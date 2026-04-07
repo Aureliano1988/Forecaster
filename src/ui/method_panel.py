@@ -31,6 +31,8 @@ class MethodPanel(QWidget):
 
     fit_requested = Signal()
     forecast_requested = Signal()
+    discard_requested = Signal()
+    eraser_toggled = Signal(bool)  # True = eraser on
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -66,8 +68,13 @@ class MethodPanel(QWidget):
 
         # ── Action buttons ───────────────────────────────────────────────────
         self.btn_fit = QPushButton("Построить тренд")
+        self.btn_discard = QPushButton("Сбросить тренд")
+        self.btn_eraser = QPushButton("Ластик (исключить данные)")
+        self.btn_eraser.setCheckable(True)
         self.btn_forecast = QPushButton("Рассчитать прогноз")
         layout.addWidget(self.btn_fit)
+        layout.addWidget(self.btn_discard)
+        layout.addWidget(self.btn_eraser)
         layout.addWidget(self.btn_forecast)
 
         # ── Result display ───────────────────────────────────────────────────
@@ -84,6 +91,8 @@ class MethodPanel(QWidget):
         # ── Connections ──────────────────────────────────────────────────────
         self.cmb_family.currentIndexChanged.connect(self._update_methods)
         self.btn_fit.clicked.connect(self.fit_requested.emit)
+        self.btn_discard.clicked.connect(self.discard_requested.emit)
+        self.btn_eraser.toggled.connect(self.eraser_toggled.emit)
         self.btn_forecast.clicked.connect(self.forecast_requested.emit)
 
         # Initial population

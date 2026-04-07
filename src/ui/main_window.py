@@ -19,6 +19,7 @@ from src.data.models import (
     COL_DATE,
     COL_LIQUID,
     COL_OIL,
+    COL_WATER,
     COL_WATER_CUT,
     COL_WELL,
     COL_WORK_TYPE,
@@ -27,6 +28,7 @@ from src.data.models import (
 from src.data.validation import validate
 from src.export.exporter import export_forecast_csv, export_plot
 from src.forecasting.base import ForecastMethod
+from src.forecasting.displacement import LinearDisplacement
 from src.ui.data_panel import DataPanel
 from src.ui.method_panel import MethodPanel
 from src.ui.plot_widget import PlotWidget
@@ -43,6 +45,13 @@ class MainWindow(QMainWindow):
         self._selected_wells: list[str] = []
         self._span_range: tuple[float, float] | None = None
         self._current_method: ForecastMethod | None = None
+        self._excluded_ranges: list[tuple[float, float]] = []
+        self._eraser_active: bool = False
+
+        # Plot overlay references (for in-place update)
+        self._trend_line = None
+        self._forecast_line = None
+        self._excl_patches: list = []
 
         # ── Widgets ──────────────────────────────────────────────────────────
         self.data_panel = DataPanel()
@@ -72,6 +81,8 @@ class MainWindow(QMainWindow):
         self.data_panel.btn_load.clicked.connect(self._on_load)
         self.data_panel.wells_changed.connect(self._on_wells_changed)
         self.method_panel.fit_requested.connect(self._on_fit)
+        self.method_panel.discard_requested.connect(self._on_discard)
+        self.method_panel.eraser_toggled.connect(self._on_eraser_toggle)
         self.method_panel.forecast_requested.connect(self._on_forecast)
         self.method_panel.cmb_family.currentIndexChanged.connect(self._on_plot_data)
         self.method_panel.cmb_method.currentIndexChanged.connect(self._on_plot_data)
@@ -126,10 +137,13 @@ class MainWindow(QMainWindow):
         ax = self.plot_widget.ax
 
         if family == "Характеристики вытеснения":
-            x, y = self._agg_cumulative(sub, COL_CUM_LIQUID), self._agg_cumulative(sub, COL_CUM_OIL)
-            ax.scatter(x, y, s=4, label="Qo vs Ql (факт)")
-            ax.set_xlabel("Накопленная жидкость, т")
-            ax.set_ylabel("Накопленная нефть, т")
+            method_cls = self.method_panel.get_method_class()
+            prod = self._get_displacement_data(sub)
+            if method_cls is not None and prod is not None:
+                x, y = method_cls.prepare_xy(*prod)
+                ax.scatter(x, y, s=4, label="Факт")
+                ax.set_xlabel(method_cls.x_label)
+                ax.set_ylabel(method_cls.y_label)
 
         elif family == "Кривые падения добычи (DCA)":
             ts = self._monthly_series(sub, COL_OIL)
@@ -137,6 +151,7 @@ class MainWindow(QMainWindow):
                 ax.plot(range(len(ts)), ts.values, "o-", ms=3, label="Добыча нефти (факт)")
                 ax.set_xlabel("Месяц")
                 ax.set_ylabel("Добыча нефти, т/мес")
+                ax.set_yscale("log")
 
         elif family == "Фракционный поток":
             x = self._agg_cumulative(sub, COL_CUM_OIL)
@@ -153,10 +168,51 @@ class MainWindow(QMainWindow):
     # ── Span selector callback ───────────────────────────────────────────────
 
     def _on_span_select(self, xmin: float, xmax: float) -> None:
-        self._span_range = (xmin, xmax)
-        self.status.showMessage(
-            f"Выбран диапазон: {xmin:.1f} – {xmax:.1f}", 5000
-        )
+        if self._eraser_active:
+            self._excluded_ranges.append((xmin, xmax))
+            self._draw_exclusion_patches()
+            self.status.showMessage(
+                f"Исключён диапазон: {xmin:.1f} – {xmax:.1f}  "
+                f"(всего исключений: {len(self._excluded_ranges)})", 5000
+            )
+        else:
+            self._span_range = (xmin, xmax)
+            self.status.showMessage(
+                f"Выбран диапазон: {xmin:.1f} – {xmax:.1f}", 5000
+            )
+
+    # ── Eraser toggle ─────────────────────────────────────────────────────────
+
+    def _on_eraser_toggle(self, active: bool) -> None:
+        self._eraser_active = active
+        if active:
+            self.status.showMessage(
+                "Ластик: выделите диапазон на графике для исключения", 5000
+            )
+        else:
+            self.status.showMessage("Ластик выключен", 2000)
+
+    def _draw_exclusion_patches(self) -> None:
+        """Draw red shading for all excluded ranges."""
+        # Remove old patches
+        for p in self._excl_patches:
+            p.remove()
+        self._excl_patches.clear()
+
+        ax = self.plot_widget.ax
+        for xmin, xmax in self._excluded_ranges:
+            patch = ax.axvspan(xmin, xmax, alpha=0.15, color="red")
+            self._excl_patches.append(patch)
+        self.plot_widget.canvas.draw_idle()
+
+    def _apply_exclusions(self, x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Remove points falling inside any excluded range."""
+        if not self._excluded_ranges:
+            return x, y
+        mask = np.ones(len(x), dtype=bool)
+        for xmin, xmax in self._excluded_ranges:
+            mask &= ~((x >= xmin) & (x <= xmax))
+        return x[mask], y[mask]
 
     # ── Fit trend ────────────────────────────────────────────────────────────
 
@@ -180,6 +236,9 @@ class MainWindow(QMainWindow):
         else:
             x_sel, y_sel = x, y
 
+        # Apply exclusion zones
+        x_sel, y_sel = self._apply_exclusions(x_sel, y_sel)
+
         if len(x_sel) < 2:
             self.status.showMessage("Слишком мало точек в выбранном диапазоне", 4000)
             return
@@ -188,11 +247,16 @@ class MainWindow(QMainWindow):
         method.fit(x_sel, y_sel)
         self._current_method = method
 
-        # Overlay fit line
+        # Remove old trend / forecast lines before drawing
+        self._remove_overlay_lines()
+
+        # Overlay fit line only within the selected range
         ax = self.plot_widget.ax
-        x_line = np.linspace(x.min(), x.max(), 300)
+        x_line = np.linspace(x_sel.min(), x_sel.max(), 300)
         y_line = method.predict(x_line)
-        ax.plot(x_line, y_line, "r-", lw=2, label=f"Тренд: {method.get_name()}")
+        self._trend_line, = ax.plot(
+            x_line, y_line, "r-", lw=2, label=f"Тренд: {method.get_name()}"
+        )
         self.plot_widget.redraw()
 
         r2 = method.r_squared(x_sel, y_sel)
@@ -202,6 +266,26 @@ class MainWindow(QMainWindow):
             lines.append(f"  {k} = {v}")
         self.method_panel.show_result("\n".join(lines))
         self.status.showMessage(f"Тренд построен, R² = {r2:.4f}", 5000)
+
+    # ── Remove / discard helpers ──────────────────────────────────────────────
+
+    def _remove_overlay_lines(self) -> None:
+        """Remove existing trend and forecast lines from the axes."""
+        if self._trend_line is not None:
+            self._trend_line.remove()
+            self._trend_line = None
+        if self._forecast_line is not None:
+            self._forecast_line.remove()
+            self._forecast_line = None
+
+    def _on_discard(self) -> None:
+        self._current_method = None
+        self._span_range = None
+        self._excluded_ranges.clear()
+        self.method_panel.show_result("")
+        self.method_panel.btn_eraser.setChecked(False)
+        self._on_plot_data()
+        self.status.showMessage("Тренд сброшен", 3000)
 
     # ── Forecast ─────────────────────────────────────────────────────────────
 
@@ -216,17 +300,25 @@ class MainWindow(QMainWindow):
 
         horizon = self.method_panel.get_horizon()
         family = self.method_panel.get_family_name()
+        x_last = float(x[-1])
 
         if family == "Кривые падения добычи (DCA)":
-            x_fc = np.arange(len(x), len(x) + horizon, dtype=float)
+            x_fc = np.arange(x_last + 1, x_last + 1 + horizon, dtype=float)
         else:
-            # Extrapolate x by extending linearly
             dx = (x[-1] - x[0]) / max(len(x) - 1, 1)
-            x_fc = np.linspace(x[-1], x[-1] + dx * horizon, horizon)
+            x_fc = np.linspace(x_last, x_last + dx * horizon, horizon)
 
         y_fc = self._current_method.predict(x_fc)
+
+        # Remove old forecast line before drawing
+        if self._forecast_line is not None:
+            self._forecast_line.remove()
+            self._forecast_line = None
+
         ax = self.plot_widget.ax
-        ax.plot(x_fc, y_fc, "g--", lw=2, label="Прогноз")
+        self._forecast_line, = ax.plot(
+            x_fc, y_fc, "g--", lw=2, label="Прогноз"
+        )
         self.plot_widget.redraw()
         self.status.showMessage(f"Прогноз рассчитан на {horizon} мес.", 5000)
 
@@ -257,11 +349,12 @@ class MainWindow(QMainWindow):
             return
         horizon = self.method_panel.get_horizon()
         family = self.method_panel.get_family_name()
+        x_last = float(x[-1])
         if family == "Кривые падения добычи (DCA)":
-            x_fc = np.arange(len(x), len(x) + horizon, dtype=float)
+            x_fc = np.arange(x_last + 1, x_last + 1 + horizon, dtype=float)
         else:
             dx = (x[-1] - x[0]) / max(len(x) - 1, 1)
-            x_fc = np.linspace(x[-1], x[-1] + dx * horizon, horizon)
+            x_fc = np.linspace(x_last, x_last + dx * horizon, horizon)
         y_fc = self._current_method.predict(x_fc)
         export_forecast_csv(x_fc, y_fc, self._current_method.get_name(), path)
         self.status.showMessage(f"Прогноз экспортирован: {path}", 3000)
@@ -280,8 +373,11 @@ class MainWindow(QMainWindow):
         family = self.method_panel.get_family_name()
 
         if family == "Характеристики вытеснения":
-            x = self._agg_cumulative(sub, COL_CUM_LIQUID)
-            y = self._agg_cumulative(sub, COL_CUM_OIL)
+            method_cls = self.method_panel.get_method_class()
+            prod = self._get_displacement_data(sub)
+            if method_cls is None or prod is None:
+                return None, None
+            x, y = method_cls.prepare_xy(*prod)
 
         elif family == "Кривые падения добычи (DCA)":
             ts = self._monthly_series(sub, COL_OIL)
@@ -300,6 +396,26 @@ class MainWindow(QMainWindow):
         if x is None or y is None or len(x) == 0:
             return None, None
         return np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+
+    @staticmethod
+    def _get_displacement_data(
+        sub: pd.DataFrame,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+        """Return (Qo, Ql, Qw, qo, ql, qw) aggregated by date."""
+        if COL_DATE not in sub.columns:
+            return None
+        cols = {COL_OIL: "sum", COL_WATER: "sum"}
+        for c in cols:
+            if c not in sub.columns:
+                return None
+        agg = sub.groupby(COL_DATE).agg(cols).sort_index()
+        qo = agg[COL_OIL].values.astype(float)
+        qw = agg[COL_WATER].values.astype(float)
+        ql = qo + qw
+        Qo = np.cumsum(qo)
+        Ql = np.cumsum(ql)
+        Qw = np.cumsum(qw)
+        return Qo, Ql, Qw, qo, ql, qw
 
     @staticmethod
     def _agg_cumulative(sub: pd.DataFrame, col: str) -> np.ndarray | None:
