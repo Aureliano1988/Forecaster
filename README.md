@@ -74,19 +74,28 @@ python main.py
 
 ## Input Data Format
 
-The application expects monthly production data with the following columns (at minimum):
+The application accepts CSV (semicolon- or comma-delimited) and Excel files with Russian-language headers as exported from standard MER (monthly exploitation report) systems.
 
-| Column      | Description                     |
-|-------------|---------------------------------|
-| well        | Well identifier                 |
-| date        | Production date (YYYY-MM)       |
-| oil         | Monthly oil production (tonnes) |
-| water       | Monthly water production (m³)   |
-| gas         | Monthly gas production (m³)     |
-| liquid      | Monthly liquid production (m³)  |
-| days        | Days on production              |
+**Expected columns (Russian headers, auto-mapped on load):**
 
-Cumulative values are calculated automatically if not provided.
+- `имя скважины` — well name
+- `дата(дд.мм.гггг)` — date (DD.MM.YYYY)
+- `пласт` — formation
+- `характер работы` — work type (НЕФ = oil, НАГ = injection)
+- `состояние` — well status (РАБ., ЛИК, КОНС, etc.)
+- `способ эксплуатации` — exploitation method
+- `причина простоя` — downtime reason
+- `время работы, ч` — operating hours
+- `время накопления, ч` — accumulation hours
+- `время простоя, ч` — downtime hours
+- `нефть, т` — monthly oil production (tonnes)
+- `вода, т/Закачка, Водозабор, м3` — water / injection (t or m³)
+- `газ, м3` — gas production (m³)
+- `газ из ГШ, м3` — gas-cap gas (m³)
+- `Конденсат, т` — condensate (tonnes)
+- `доп.параметр` — additional parameter
+
+Liquid and cumulative values are computed automatically.
 
 ## License
 
