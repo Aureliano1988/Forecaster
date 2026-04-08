@@ -29,10 +29,10 @@ _FAMILIES: dict[str, list] = {
 class MethodPanel(QWidget):
     """Panel to select and run a forecasting method."""
 
-    fit_requested = Signal()
-    forecast_requested = Signal()
+    build_requested = Signal()
     discard_requested = Signal()
-    eraser_toggled = Signal(bool)  # True = eraser on
+    eraser_toggled = Signal(bool)   # True = eraser on
+    save_requested = Signal()       # user clicked "Save project"
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -61,28 +61,34 @@ class MethodPanel(QWidget):
         grp2_layout = QVBoxLayout(grp2)
         grp2_layout.addWidget(QLabel("Горизонт прогноза (мес.):"))
         self.spn_horizon = QSpinBox()
-        self.spn_horizon.setRange(1, 600)
+        self.spn_horizon.setRange(1, 1200)
         self.spn_horizon.setValue(60)
         grp2_layout.addWidget(self.spn_horizon)
+
+        grp2_layout.addWidget(QLabel("Предел ВНО (WOR):" ))
+        self.spn_wor_limit = QSpinBox()
+        self.spn_wor_limit.setRange(1, 999)
+        self.spn_wor_limit.setValue(99)
+        grp2_layout.addWidget(self.spn_wor_limit)
         layout.addWidget(grp2)
 
         # ── Action buttons ───────────────────────────────────────────────────
-        self.btn_fit = QPushButton("Построить тренд")
+        self.btn_build = QPushButton("Построить прогноз")
         self.btn_discard = QPushButton("Сбросить тренд")
         self.btn_eraser = QPushButton("Ластик (исключить данные)")
         self.btn_eraser.setCheckable(True)
-        self.btn_forecast = QPushButton("Рассчитать прогноз")
-        layout.addWidget(self.btn_fit)
+        self.btn_save = QPushButton("Сохранить проект…")
+        layout.addWidget(self.btn_build)
         layout.addWidget(self.btn_discard)
         layout.addWidget(self.btn_eraser)
-        layout.addWidget(self.btn_forecast)
+        layout.addWidget(self.btn_save)
 
         # ── Result display ───────────────────────────────────────────────────
         grp3 = QGroupBox("Результаты")
         grp3_layout = QVBoxLayout(grp3)
         self.txt_result = QTextEdit()
         self.txt_result.setReadOnly(True)
-        self.txt_result.setMaximumHeight(180)
+        self.txt_result.setMinimumHeight(160)
         grp3_layout.addWidget(self.txt_result)
         layout.addWidget(grp3)
 
@@ -90,10 +96,10 @@ class MethodPanel(QWidget):
 
         # ── Connections ──────────────────────────────────────────────────────
         self.cmb_family.currentIndexChanged.connect(self._update_methods)
-        self.btn_fit.clicked.connect(self.fit_requested.emit)
+        self.btn_build.clicked.connect(self.build_requested.emit)
         self.btn_discard.clicked.connect(self.discard_requested.emit)
         self.btn_eraser.toggled.connect(self.eraser_toggled.emit)
-        self.btn_forecast.clicked.connect(self.forecast_requested.emit)
+        self.btn_save.clicked.connect(self.save_requested.emit)
 
         # Initial population
         self._update_methods()
@@ -113,6 +119,9 @@ class MethodPanel(QWidget):
 
     def get_horizon(self) -> int:
         return self.spn_horizon.value()
+
+    def get_wor_limit(self) -> float:
+        return float(self.spn_wor_limit.value())
 
     def show_result(self, text: str) -> None:
         self.txt_result.setPlainText(text)

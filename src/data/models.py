@@ -75,3 +75,43 @@ class ForecastResult:
     y_forecast: list[float] = field(default_factory=list)
     parameters: dict = field(default_factory=dict)
     r_squared: float | None = None
+
+
+@dataclass
+class ForecastSeries:
+    """Month-by-month physical forecast output."""
+
+    qo:  list[float] = field(default_factory=list)   # monthly oil, t
+    qw:  list[float] = field(default_factory=list)   # monthly water, t
+    ql:  list[float] = field(default_factory=list)   # monthly liquid, t
+    Qo:  list[float] = field(default_factory=list)   # cumulative oil from forecast start, t
+    Qw:  list[float] = field(default_factory=list)   # cumulative water from forecast start, t
+    Ql:  list[float] = field(default_factory=list)   # cumulative liquid from forecast start, t
+    WOR: list[float] = field(default_factory=list)   # monthly water-oil ratio qw/qo
+
+    @property
+    def duration(self) -> int:
+        return len(self.qo)
+
+    @property
+    def remain_reserves(self) -> float:
+        """Total forecasted oil production (t)."""
+        return float(sum(self.qo))
+
+    @property
+    def wor_last(self) -> float:
+        return float(self.WOR[-1]) if self.WOR else 0.0
+
+
+@dataclass
+class SavedMethodResult:
+    """Persists trend + forecast for one technique across method switches."""
+
+    method_name: str
+    params_text: str                                   # formatted string shown in results panel
+    parameters:  dict          = field(default_factory=dict)
+    x_trend:     list[float]   = field(default_factory=list)
+    y_trend:     list[float]   = field(default_factory=list)
+    x_forecast:  list[float]   = field(default_factory=list)
+    y_forecast:  list[float]   = field(default_factory=list)
+    monthly:     ForecastSeries | None = None
