@@ -53,6 +53,7 @@ def save_fcst_file(
         entry: dict = {
             "family": family,
             "method_name": result.method_name,
+            "params_text": result.params_text,
             "parameters": result.parameters,
             "x_trend": result.x_trend,
             "y_trend": result.y_trend,
@@ -86,3 +87,68 @@ def save_fcst_file(
         json.dumps(data, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def load_fcst_file(path: str | Path) -> dict:
+    """Load a .fcst project file.
+
+    Returns a dict with keys:
+      ``wells``        — list of well names that were selected
+      ``source_file``  — path of the original production data file
+      ``results``      — ``dict[str, SavedMethodResult]`` keyed by family|method
+    """
+    import json
+    from src.data.models import ForecastSeries, SavedMethodResult
+
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+
+    results: dict = {}
+    for key, entry in data.get("results", {}).items():
+        # Reconstruct ForecastSeries
+        monthly: ForecastSeries | None = None
+        mf = entry.get("monthly_forecast")
+        if mf:
+            monthly = ForecastSeries(
+                qo=mf.get("qo", []),
+                qw=mf.get("qw", []),
+                ql=mf.get("ql", []),
+                Qo=mf.get("Qo", []),
+                Qw=mf.get("Qw", []),
+                Ql=mf.get("Ql", []),
+                WOR=mf.get("WOR", []),
+            )
+
+        # Restore params_text — or rebuild a basic version if not stored
+        params_text = entry.get("params_text", "")
+        if not params_text:
+            mn = entry.get("method_name", "?")
+            lines = [f"Метод: {mn}"]
+            for k, v in entry.get("parameters", {}).items():
+                lines.append(f"  {k} = {float(v):.6g}")
+            if monthly and monthly.duration > 0:
+                sw = "WOR" if monthly.WOR and monthly.WOR[-1] >= 99 else "горизонт"
+                lines += [
+                    f"{'\u2500'*22}",
+                    f"Прогноз (стоп: {sw}):",
+                    f"  Горизонт: {monthly.duration} мес.",
+                    f"  Ост. запасы: {monthly.remain_reserves:,.0f} т",
+                    f"  WOR (посл.): {monthly.wor_last:.2f}",
+                ]
+            params_text = "\n".join(lines)
+
+        results[key] = SavedMethodResult(
+            method_name=entry.get("method_name", ""),
+            params_text=params_text,
+            parameters=entry.get("parameters", {}),
+            x_trend=entry.get("x_trend", []),
+            y_trend=entry.get("y_trend", []),
+            x_forecast=entry.get("x_forecast", []),
+            y_forecast=entry.get("y_forecast", []),
+            monthly=monthly,
+        )
+
+    return {
+        "wells": data.get("wells", []),
+        "source_file": data.get("source_file", ""),
+        "results": results,
+    }

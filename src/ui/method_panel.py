@@ -33,6 +33,8 @@ class MethodPanel(QWidget):
     discard_requested = Signal()
     eraser_toggled = Signal(bool)   # True = eraser on
     save_requested = Signal()       # user clicked "Save project"
+    autofit_requested = Signal()    # single-method autofit
+    autofit_all_requested = Signal()  # autofit all methods
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -74,11 +76,15 @@ class MethodPanel(QWidget):
 
         # ── Action buttons ───────────────────────────────────────────────────
         self.btn_build = QPushButton("Построить прогноз")
-        self.btn_discard = QPushButton("Сбросить тренд")
+        self.btn_autofit = QPushButton("Автоподбор")
+        self.btn_autofit_all = QPushButton("Автоподбор всех")
+        self.btn_discard = QPushButton("Сбросить")
         self.btn_eraser = QPushButton("Ластик (исключить данные)")
         self.btn_eraser.setCheckable(True)
         self.btn_save = QPushButton("Сохранить проект…")
         layout.addWidget(self.btn_build)
+        layout.addWidget(self.btn_autofit)
+        layout.addWidget(self.btn_autofit_all)
         layout.addWidget(self.btn_discard)
         layout.addWidget(self.btn_eraser)
         layout.addWidget(self.btn_save)
@@ -97,6 +103,8 @@ class MethodPanel(QWidget):
         # ── Connections ──────────────────────────────────────────────────────
         self.cmb_family.currentIndexChanged.connect(self._update_methods)
         self.btn_build.clicked.connect(self.build_requested.emit)
+        self.btn_autofit.clicked.connect(self.autofit_requested.emit)
+        self.btn_autofit_all.clicked.connect(self.autofit_all_requested.emit)
         self.btn_discard.clicked.connect(self.discard_requested.emit)
         self.btn_eraser.toggled.connect(self.eraser_toggled.emit)
         self.btn_save.clicked.connect(self.save_requested.emit)

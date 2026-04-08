@@ -55,7 +55,25 @@ def load_file(path: str | Path) -> pd.DataFrame:
     return df
 
 
-# ── Private helpers ──────────────────────────────────────────────────────────
+# ── Public helpers ───────────────────────────────────────────────────────────
+
+_DERIVED_COLS = [
+    COL_LIQUID, COL_CUM_OIL, COL_CUM_WATER,
+    COL_CUM_LIQUID, COL_CUM_GAS, COL_WATER_CUT,
+]
+
+
+def recompute_derived(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop existing derived columns and recompute them from base columns.
+
+    Use this after concatenating two loaded DataFrames so that cumulative
+    sums are recalculated over the full combined history.
+    """
+    df = df.drop(columns=[c for c in _DERIVED_COLS if c in df.columns])
+    return _compute_derived(df.copy())
+
+
+# ── Private helpers ────────────────────────────────────────────────────────────
 
 
 def _read_csv(path: Path) -> pd.DataFrame:

@@ -66,14 +66,15 @@ class DataPanel(QWidget):
     def get_selected_wells(self) -> list[str]:
         return [item.text() for item in self.well_list.selectedItems()]
 
-    def get_file_path(self) -> str | None:
-        path, _ = QFileDialog.getOpenFileName(
+    def get_file_paths(self) -> list[str]:
+        """Open a multi-file dialog; returns empty list if cancelled."""
+        paths, _ = QFileDialog.getOpenFileNames(
             self,
-            "Открыть файл данных",
+            "Открыть файл(ы) данных",
             "",
             "CSV / Excel (*.csv *.txt *.xls *.xlsx);;Все файлы (*)",
         )
-        return path or None
+        return paths
 
     # ── Slots ────────────────────────────────────────────────────────────────
 

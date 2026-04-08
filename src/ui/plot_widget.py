@@ -1,10 +1,10 @@
-"""Matplotlib canvas widget with interactive span selection."""
+"""Matplotlib canvas widget with interactive lasso selection."""
 
 from __future__ import annotations
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
-from matplotlib.widgets import SpanSelector
+from matplotlib.widgets import LassoSelector
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 
@@ -13,7 +13,7 @@ class PlotWidget(QWidget):
 
     Provides:
     - ``ax`` — main axes for plotting.
-    - ``enable_span_selector(callback)`` — interactive X-range selection.
+    - ``enable_lasso_selector(callback)`` — free-draw polygon point selection.
     """
 
     def __init__(self, parent: QWidget | None = None):
@@ -23,14 +23,14 @@ class PlotWidget(QWidget):
         self.canvas = FigureCanvasQTAgg(self.figure)
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
 
-        self._span: SpanSelector | None = None
+        self._lasso: LassoSelector | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.toolbar)
         layout.addWidget(self.canvas)
 
-    # ── Public API ───────────────────────────────────────────────────────────
+    # ── Public API ───────────────────────────────────────────────────────────────────
 
     def clear(self) -> None:
         self.ax.clear()
@@ -40,22 +40,20 @@ class PlotWidget(QWidget):
         self.ax.legend(fontsize=8)
         self.canvas.draw_idle()
 
-    def enable_span_selector(self, callback) -> None:
-        """Activate horizontal span selector.
+    def enable_lasso_selector(self, callback) -> None:
+        """Activate freehand lasso selector.
 
-        *callback(xmin, xmax)* is called when the user selects a range.
+        *callback(vertices)* is called when the user finishes drawing;
+        *vertices* is a list of ``(x, y)`` coordinate pairs forming the polygon.
         """
-        self._span = SpanSelector(
+        self._lasso = LassoSelector(
             self.ax,
             callback,
-            "horizontal",
             useblit=True,
-            props=dict(alpha=0.25, facecolor="tab:blue"),
-            interactive=True,
-            drag_from_anywhere=True,
+            props=dict(color="tab:blue", linewidth=1.5, linestyle="--"),
         )
 
-    def disable_span_selector(self) -> None:
-        if self._span is not None:
-            self._span.set_active(False)
-            self._span = None
+    def disable_lasso_selector(self) -> None:
+        if self._lasso is not None:
+            self._lasso.set_active(False)
+            self._lasso = None
