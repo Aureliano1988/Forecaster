@@ -64,13 +64,49 @@ def _serialise_results(saved_results: dict) -> dict:
     return records
 
 
+def _serialise_well_analysis_scenarios(well_analysis_scenarios: list) -> list:
+    """Serialise a list of WellAnalysisScenario objects to plain dicts."""
+    result = []
+    for sc in well_analysis_scenarios:
+        entry: dict = {
+            "name":       sc.name,
+            "wells":      sc.wells,
+            "phase":      getattr(sc, "phase", "oil"),
+            "excluded":   sc.excluded,   # [[well, iso_date], ...]
+            "pct_months": sc.pct_months,
+            "pct_data":   sc.pct_data,   # {"10": [...], "50": [...], "90": [...]}
+            "pct_trends": sc.pct_trends, # {"10": [qi, Di] | null, ...}
+        }
+        result.append(entry)
+    return result
+
+
+def _deserialise_well_analysis_scenarios(raw: list) -> list:
+    """Restore WellAnalysisScenario objects from a plain-dict list."""
+    from src.data.models import WellAnalysisScenario
+    scenarios = []
+    for i, entry in enumerate(raw):
+        sc = WellAnalysisScenario(
+            name       = entry.get("name", f"Анализ {i + 1}"),
+            wells      = entry.get("wells", []),
+            phase      = entry.get("phase", "oil"),
+            excluded   = entry.get("excluded", []),
+            pct_months = entry.get("pct_months", []),
+            pct_data   = entry.get("pct_data", {}),
+            pct_trends = entry.get("pct_trends", {}),
+        )
+        scenarios.append(sc)
+    return scenarios
+
+
 def save_fcst_file(
     path: str | Path,
-    scenarios,                           # list[ForecastScenario]
+    scenarios,                                # list[ForecastScenario]
     source_files: list[str] | str = "",
     project_name: str = "",
     stoiip: float = 0.0,
     hcpv: float = 0.0,
+    well_analysis_scenarios=None,             # list[WellAnalysisScenario] | None
 ) -> None:
     """Save all forecast scenarios to a .fcst v2.0 JSON file.
 
@@ -105,6 +141,9 @@ def save_fcst_file(
         "stoiip": stoiip,
         "hcpv": hcpv,
         "scenarios": serialised_scenarios,
+        "well_analysis_scenarios": _serialise_well_analysis_scenarios(
+            well_analysis_scenarios or []
+        ),
     }
     Path(path).write_text(
         json.dumps(data, ensure_ascii=False, indent=2),
@@ -212,10 +251,14 @@ def load_fcst_file(path: str | Path) -> dict:
             )
         ]
 
+    raw_wa = data.get("well_analysis_scenarios", [])
+    well_analysis_scenarios = _deserialise_well_analysis_scenarios(raw_wa)
+
     return {
         "project_name": data.get("project_name", ""),
         "source_files": src_files,
         "stoiip": proj_stoiip,
         "hcpv":   proj_hcpv,
         "scenarios": scenarios,
+        "well_analysis_scenarios": well_analysis_scenarios,
     }

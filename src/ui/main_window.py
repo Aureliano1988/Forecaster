@@ -80,6 +80,9 @@ class MainWindow(QMainWindow):
         self._stoiip: float = 0.0   # initial oil in place, tonnes
         self._hcpv:   float = 0.0   # hydrocarbon pore volume, m³
 
+        # Well alignment analysis scenarios (persisted in the project file)
+        self._well_analysis_scenarios: list = []
+
         # Plot overlay references (for in-place update)
         self._trend_line = None
         self._forecast_line = None
@@ -258,6 +261,7 @@ class MainWindow(QMainWindow):
         self._active_scenario_idx   = 0
         self._stoiip                = 0.0
         self._hcpv                  = 0.0
+        self._well_analysis_scenarios = []
 
         # Reset UI
         self._update_window_title()
@@ -1728,13 +1732,19 @@ class MainWindow(QMainWindow):
         self._on_plot_data()
 
     def _on_well_alignment(self) -> None:
-        """Open the well alignment (debut curves) window."""
+        """Open the well alignment (adjusted production) window."""
         if self.df is None:
             self.status.showMessage("Данные не загружены", 3000)
             return
         from src.ui.well_alignment_dialog import WellAlignmentDialog
-        dlg = WellAlignmentDialog(self.df, parent=self)
+        dlg = WellAlignmentDialog(
+            self.df,
+            well_analysis_scenarios=self._well_analysis_scenarios,
+            parent=self,
+        )
         dlg.exec()
+        # Retrieve updated scenarios list
+        self._well_analysis_scenarios = dlg.result_scenarios()
 
     def _compute_scenario_hist(self, sc) -> "dict | None":
         """Compute hist_data dict for a scenario's well selection.
@@ -2050,13 +2060,14 @@ class MainWindow(QMainWindow):
             self.df = None
             self._source_files = []
 
-        # ── Restore project state ───────────────────────────────
-        self._scenarios           = scenarios
-        self._active_scenario_idx = 0
-        self._project_name        = project.get("project_name", "")
-        self._current_save_path   = fcst_path
-        self._stoiip              = project.get("stoiip", 0.0)
-        self._hcpv                = project.get("hcpv", 0.0)
+        # ── Restore project state ───────────────────────
+        self._scenarios                = scenarios
+        self._active_scenario_idx      = 0
+        self._project_name             = project.get("project_name", "")
+        self._current_save_path        = fcst_path
+        self._stoiip                   = project.get("stoiip", 0.0)
+        self._hcpv                     = project.get("hcpv", 0.0)
+        self._well_analysis_scenarios  = project.get("well_analysis_scenarios", [])
 
         # Load scenario 0 into working buffers (no commit needed — nothing to commit)
         self._load_scenario_into_buffers(0)
@@ -2131,6 +2142,7 @@ class MainWindow(QMainWindow):
                 project_name=self._project_name,
                 stoiip=self._stoiip,
                 hcpv=self._hcpv,
+                well_analysis_scenarios=self._well_analysis_scenarios,
             )
             self.status.showMessage(f"Проект сохранён: {path}", 5000)
             return True

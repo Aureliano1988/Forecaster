@@ -123,6 +123,28 @@ class SavedMethodResult:
 
 
 @dataclass
+class WellAnalysisScenario:
+    """A named adjusted-production analysis scenario.
+
+    Stores the well selection, fluid phase, user-excluded (well, date) pairs,
+    and any generated P90/P50/P10 percentile data so the analysis can be
+    restored from a project file without re-running the computation.
+    """
+
+    name:       str
+    wells:      list[str]       = field(default_factory=list)
+    phase:      str             = "oil"   # "oil" | "gas"
+    # Excluded data points as [[well, iso_date_str], ...] for JSON stability
+    excluded:   list[list]      = field(default_factory=list)
+    # Percentile output — empty lists when not yet generated
+    pct_months: list[float]     = field(default_factory=list)
+    # Profile values: keys "10", "50", "90" → list[float]
+    pct_data:   dict            = field(default_factory=dict)
+    # Trend parameters: keys "10", "50", "90" → [qi, Di] or null
+    pct_trends: dict            = field(default_factory=dict)
+
+
+@dataclass
 class ForecastScenario:
     """A named forecast scenario: a well selection + all fitted method results."""
 
