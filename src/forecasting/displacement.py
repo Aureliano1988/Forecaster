@@ -254,7 +254,7 @@ class WOR(LinearDisplacement):
     y_label = "ln(qw / qo)"
 
     def get_name(self) -> str:
-        return "ВНО (WOR)"
+        return "ВНФ (WOR)"
 
     @staticmethod
     def prepare_xy(Qo, Ql, Qw, qo, ql, qw):

@@ -16,7 +16,9 @@ COL_HOURS_WORK = "hours_work"
 COL_HOURS_ACCUM = "hours_accum"
 COL_HOURS_DOWN = "hours_down"
 COL_OIL = "oil_t"
-COL_WATER = "water_t"
+COL_WATER = "water_t"          # produced water only
+COL_WATER_DUAL = "water_dual"  # combined: auto-split by oil>0 → production / injection
+COL_WATER_INJ  = "water_inj"  # injection only
 COL_GAS = "gas_m3"
 COL_GAS_CAP = "gas_cap_m3"
 COL_CONDENSATE = "condensate_t"
@@ -44,7 +46,7 @@ HEADER_MAP: dict[str, str] = {
     "время накопления, ч":                   COL_HOURS_ACCUM,
     "время простоя, ч":                      COL_HOURS_DOWN,
     "нефть, т":                              COL_OIL,
-    "вода, т/закачка, водозабор, м3":        COL_WATER,
+    "вода, т/закачка, водозабор, м3":        COL_WATER_DUAL,  # default: auto-split
     "газ, м3":                               COL_GAS,
     "газ из гш, м3":                         COL_GAS_CAP,
     "конденсат, т":                          COL_CONDENSATE,
@@ -54,7 +56,8 @@ HEADER_MAP: dict[str, str] = {
 # Numeric columns that must be coerced to float
 NUMERIC_COLS = [
     COL_HOURS_WORK, COL_HOURS_ACCUM, COL_HOURS_DOWN,
-    COL_OIL, COL_WATER, COL_GAS, COL_GAS_CAP, COL_CONDENSATE, COL_EXTRA,
+    COL_OIL, COL_WATER, COL_WATER_DUAL, COL_WATER_INJ,
+    COL_GAS, COL_GAS_CAP, COL_CONDENSATE, COL_EXTRA,
 ]
 
 # Work-type constants
@@ -88,6 +91,7 @@ class ForecastSeries:
     Qw:  list[float] = field(default_factory=list)   # cumulative water from forecast start, t
     Ql:  list[float] = field(default_factory=list)   # cumulative liquid from forecast start, t
     WOR: list[float] = field(default_factory=list)   # monthly water-oil ratio qw/qo
+    stop_reason: str = ""                             # 'WOR' | 'мин. нефть' | 'горизонт' | ''
 
     @property
     def duration(self) -> int:
@@ -115,3 +119,16 @@ class SavedMethodResult:
     x_forecast:  list[float]   = field(default_factory=list)
     y_forecast:  list[float]   = field(default_factory=list)
     monthly:     ForecastSeries | None = None
+    qo_hist_last: float = 0.0                          # last historical cum. oil for UOR
+
+
+@dataclass
+class ForecastScenario:
+    """A named forecast scenario: a well selection + all fitted method results."""
+
+    name: str
+    wells:   list[str]                    = field(default_factory=list)
+    results: dict[str, SavedMethodResult] = field(default_factory=dict)
+    stoiip:  float = 0.0   # initial oil in place for this scenario (0 = use project default)
+    hcpv:    float = 0.0   # hydrocarbon pore volume for this scenario (0 = use project default)
+    phase:   str   = "oil" # forecasting phase: "oil" | "gas"

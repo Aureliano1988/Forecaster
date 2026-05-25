@@ -87,6 +87,7 @@ def build_displacement_forecast(
     ql_last: float,
     max_months: int,
     wor_limit: float = 99.0,
+    min_oil: float = 0.0,
 ) -> ForecastSeries:
     """Monthly forecast for LinearDisplacement methods.
 
@@ -117,6 +118,9 @@ def build_displacement_forecast(
         qo = Qo_next - Qo_cum
         if qo <= 0:
             break
+        if min_oil > 0 and qo < min_oil:
+            series.stop_reason = "мин. нефть"
+            break
         qo = min(qo, ql_last)      # can't exceed total liquid
         qw = max(0.0, ql_last - qo)
         wor = qw / qo               # qo > 0 guaranteed
@@ -137,12 +141,15 @@ def build_displacement_forecast(
         Ql_cum = Ql_next
 
         if wor >= wor_limit:
+            series.stop_reason = "ВНФ"
             break
 
+    if not series.stop_reason and series.duration > 0:
+        series.stop_reason = "горизонт"
     return series
 
 
-# ── Decline Curve Analysis ────────────────────────────────────────────────────────────────
+# ── Decline Curve Analysis
 
 def dca_time_shift(method: ForecastMethod, q0: float) -> float:
     """Find t_shift such that method.predict(t_shift) ≈ q0.
@@ -178,6 +185,7 @@ def build_dca_forecast(
     ql_last: float,
     max_months: int,
     wor_limit: float = 99.0,
+    min_oil: float = 0.0,
 ) -> ForecastSeries:
     """Monthly forecast for Arps DCA methods.
 
@@ -199,6 +207,9 @@ def build_dca_forecast(
         qo = float(method.predict(np.array([t_shift + i]))[0])
         if qo <= 0:
             break
+        if min_oil > 0 and qo < min_oil:
+            series.stop_reason = "мин. нефть"
+            break
         qo = min(qo, ql_last)
         qw = max(0.0, ql_last - qo)
         wor = qw / qo
@@ -216,12 +227,15 @@ def build_dca_forecast(
         series.WOR.append(wor)
 
         if wor >= wor_limit:
+            series.stop_reason = "ВНФ"
             break
 
+    if not series.stop_reason and series.duration > 0:
+        series.stop_reason = "горизонт"
     return series
 
 
-# ── Fractional flow ───────────────────────────────────────────────────────────
+# ── Fractional flow
 
 def build_fractional_forecast(
     method: ForecastMethod,
@@ -230,6 +244,7 @@ def build_fractional_forecast(
     ql_last: float,
     max_months: int,
     wor_limit: float = 99.0,
+    min_oil: float = 0.0,
 ) -> ForecastSeries:
     """Monthly forecast for fractional-flow methods.
 
@@ -252,6 +267,9 @@ def build_fractional_forecast(
         qo = ql_last * (1.0 - fw)
         if qo <= 0:
             break
+        if min_oil > 0 and qo < min_oil:
+            series.stop_reason = "мин. нефть"
+            break
         qw = ql_last * fw
         wor = qw / qo
 
@@ -270,6 +288,9 @@ def build_fractional_forecast(
         Qo_cum += qo
 
         if wor >= wor_limit:
+            series.stop_reason = "ВНФ"
             break
 
+    if not series.stop_reason and series.duration > 0:
+        series.stop_reason = "горизонт"
     return series

@@ -1,2 +1,24 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+backend/.venv/
+
+# Data files
 *.csv
 *.xls*
+
+# PyInstaller build output
+build/
+dist/
+*.exe
+*.pkg
+*.spec
+
+# Installer scripts (generated / local)
+build_installer.bat
+installer.iss

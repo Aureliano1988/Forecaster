@@ -30,31 +30,16 @@ def export_plot(fig: Figure, path: str | Path, dpi: int = 150) -> None:
     fig.savefig(str(path), dpi=dpi, bbox_inches="tight")
 
 
-def save_fcst_file(
-    path: str | Path,
-    saved_results: dict,
-    wells: list[str],
-    source_file: str = "",
-) -> None:
-    """Save built trends and forecasts to a .fcst JSON text file.
-
-    The file stores, for every fitted technique:
-    - method family and name
-    - fitted parameters
-    - trend and forecast line arrays (method-space coordinates)
-    - month-by-month physical forecast table (qo, qw, ql, Qo, Qw, Ql, WOR)
-    """
-    import json
-    from datetime import datetime, timezone
-
+def _serialise_results(saved_results: dict) -> dict:
+    """Convert a ``dict[str, SavedMethodResult]`` to a JSON-serialisable dict."""
     records: dict = {}
     for key, result in saved_results.items():
-        family, method_name = key.split("|", 1)
         entry: dict = {
-            "family": family,
+            "family": key.split("|", 1)[0],
             "method_name": result.method_name,
             "params_text": result.params_text,
             "parameters": result.parameters,
+            "qo_hist_last": result.qo_hist_last,
             "x_trend": result.x_trend,
             "y_trend": result.y_trend,
             "x_forecast": result.x_forecast,
@@ -64,6 +49,7 @@ def save_fcst_file(
         if m is not None and m.duration > 0:
             entry["monthly_forecast"] = {
                 "duration": m.duration,
+                "stop_reason": m.stop_reason,
                 "remain_reserves_t": round(m.remain_reserves, 2),
                 "wor_last": round(m.wor_last, 4),
                 "qo":  [round(v, 4) for v in m.qo],
@@ -75,13 +61,50 @@ def save_fcst_file(
                 "WOR": [round(v, 4) for v in m.WOR],
             }
         records[key] = entry
+    return records
+
+
+def save_fcst_file(
+    path: str | Path,
+    scenarios,                           # list[ForecastScenario]
+    source_files: list[str] | str = "",
+    project_name: str = "",
+    stoiip: float = 0.0,
+    hcpv: float = 0.0,
+) -> None:
+    """Save all forecast scenarios to a .fcst v2.0 JSON file.
+
+    Each scenario stores its name, selected wells, and all fitted method
+    results.  Source data file paths are preserved so they can be reloaded
+    automatically when the project is opened.
+    """
+    import json
+    from datetime import datetime, timezone
+
+    # Normalise to list (accept legacy callers passing a plain string)
+    if isinstance(source_files, str):
+        source_files = [source_files] if source_files else []
+
+    serialised_scenarios = [
+        {
+            "name": sc.name,
+            "wells": sc.wells,
+            "stoiip": sc.stoiip,
+            "hcpv":   sc.hcpv,
+            "phase":  getattr(sc, "phase", "oil"),
+            "results": _serialise_results(sc.results),
+        }
+        for sc in scenarios
+    ]
 
     data = {
-        "version": "1.0",
+        "version": "2.0",
         "created": datetime.now(timezone.utc).isoformat(),
-        "wells": wells,
-        "source_file": source_file,
-        "results": records,
+        "project_name": project_name,
+        "source_files": source_files,
+        "stoiip": stoiip,
+        "hcpv": hcpv,
+        "scenarios": serialised_scenarios,
     }
     Path(path).write_text(
         json.dumps(data, ensure_ascii=False, indent=2),
@@ -89,22 +112,12 @@ def save_fcst_file(
     )
 
 
-def load_fcst_file(path: str | Path) -> dict:
-    """Load a .fcst project file.
-
-    Returns a dict with keys:
-      ``wells``        — list of well names that were selected
-      ``source_file``  — path of the original production data file
-      ``results``      — ``dict[str, SavedMethodResult]`` keyed by family|method
-    """
-    import json
+def _deserialise_results(raw_results: dict) -> dict:
+    """Convert raw JSON dict → ``dict[str, SavedMethodResult]``."""
     from src.data.models import ForecastSeries, SavedMethodResult
 
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
-
     results: dict = {}
-    for key, entry in data.get("results", {}).items():
-        # Reconstruct ForecastSeries
+    for key, entry in raw_results.items():
         monthly: ForecastSeries | None = None
         mf = entry.get("monthly_forecast")
         if mf:
@@ -116,6 +129,7 @@ def load_fcst_file(path: str | Path) -> dict:
                 Qw=mf.get("Qw", []),
                 Ql=mf.get("Ql", []),
                 WOR=mf.get("WOR", []),
+                stop_reason=mf.get("stop_reason", ""),
             )
 
         # Restore params_text — or rebuild a basic version if not stored
@@ -126,13 +140,13 @@ def load_fcst_file(path: str | Path) -> dict:
             for k, v in entry.get("parameters", {}).items():
                 lines.append(f"  {k} = {float(v):.6g}")
             if monthly and monthly.duration > 0:
-                sw = "WOR" if monthly.WOR and monthly.WOR[-1] >= 99 else "горизонт"
+                sw = "ВНФ" if monthly.WOR and monthly.WOR[-1] >= 99 else "горизонт"
                 lines += [
                     f"{'\u2500'*22}",
                     f"Прогноз (стоп: {sw}):",
                     f"  Горизонт: {monthly.duration} мес.",
                     f"  Ост. запасы: {monthly.remain_reserves:,.0f} т",
-                    f"  WOR (посл.): {monthly.wor_last:.2f}",
+                    f"  ВНФ (посл.): {monthly.wor_last:.2f}",
                 ]
             params_text = "\n".join(lines)
 
@@ -140,15 +154,68 @@ def load_fcst_file(path: str | Path) -> dict:
             method_name=entry.get("method_name", ""),
             params_text=params_text,
             parameters=entry.get("parameters", {}),
+            qo_hist_last=entry.get("qo_hist_last", 0.0),
             x_trend=entry.get("x_trend", []),
             y_trend=entry.get("y_trend", []),
             x_forecast=entry.get("x_forecast", []),
             y_forecast=entry.get("y_forecast", []),
             monthly=monthly,
         )
+    return results
+
+
+def load_fcst_file(path: str | Path) -> dict:
+    """Load a .fcst project file (v1.0 / v1.1 / v2.0).
+
+    Returns a dict with keys:
+      ``project_name``  — str
+      ``source_files``  — list[str]
+      ``scenarios``     — list[ForecastScenario]
+    """
+    import json
+    from src.data.models import ForecastScenario
+
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+
+    # Support both v1.1 (source_files list) and v1.0 (source_file string)
+    src_files: list[str] = data.get("source_files", [])
+    if not src_files:
+        legacy = data.get("source_file", "")
+        src_files = [legacy] if legacy else []
+    # Project-level stoiip/hcpv (used as fallback for scenarios that don't have their own)
+    proj_stoiip = float(data.get("stoiip", 0.0))
+    proj_hcpv   = float(data.get("hcpv",   0.0))
+
+    # ── v2.0: scenarios array ───────────────────────────────────────────────
+    if "scenarios" in data:
+        scenarios = [
+            ForecastScenario(
+                name=sc.get("name", f"Сценарий {i + 1}"),
+                wells=sc.get("wells", []),
+                results=_deserialise_results(sc.get("results", {})),
+                # Per-scenario values; fall back to project-level for old files
+                stoiip=float(sc.get("stoiip", 0.0)) or proj_stoiip,
+                hcpv=float(sc.get("hcpv",   0.0)) or proj_hcpv,
+                phase=sc.get("phase", "oil"),
+            )
+            for i, sc in enumerate(data["scenarios"])
+        ]
+    else:
+        # ── Backward compat: v1.0 / v1.1 single scenario ──────────────────
+        scenarios = [
+            ForecastScenario(
+                name="Сценарий 1",
+                wells=data.get("wells", []),
+                results=_deserialise_results(data.get("results", {})),
+                stoiip=proj_stoiip,
+                hcpv=proj_hcpv,
+            )
+        ]
 
     return {
-        "wells": data.get("wells", []),
-        "source_file": data.get("source_file", ""),
-        "results": results,
+        "project_name": data.get("project_name", ""),
+        "source_files": src_files,
+        "stoiip": proj_stoiip,
+        "hcpv":   proj_hcpv,
+        "scenarios": scenarios,
     }

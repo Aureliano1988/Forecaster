@@ -92,8 +92,7 @@ class BuckleyLeverettSemiLog(ForecastMethod):
         return {"a": self.a, "b": self.b}
 
 
-# ── Registry ─────────────────────────────────────────────────────────────────
+# ── Registry ───────────────────────────────────────────────────────────────────────────────────────────────
 FRACTIONAL_METHODS: list[type[ForecastMethod]] = [
-    WaterCutVsCumOil,
     BuckleyLeverettSemiLog,
 ]

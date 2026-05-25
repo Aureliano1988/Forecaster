@@ -17,9 +17,14 @@ from src.data.models import (
     COL_OIL,
     COL_WATER,
     COL_WATER_CUT,
+    COL_WATER_DUAL,
+    COL_WATER_INJ,
     COL_WELL,
+    COL_WORK_TYPE,
     HEADER_MAP,
     NUMERIC_COLS,
+    WORK_TYPE_INJ,
+    WORK_TYPE_OIL,
 )
 
 # Encodings to try in order
@@ -27,35 +32,65 @@ _ENCODINGS = ["utf-8-sig", "utf-8", "cp1251", "latin-1"]
 # Common CSV delimiters
 _DELIMITERS = [";", ",", "\t"]
 
+def read_raw(path: str | Path) -> pd.DataFrame:
+    """Read a CSV or Excel file and return the raw DataFrame (no renaming).
+
+    Headers are kept exactly as they appear in the file so the caller can
+    present them to the user for manual column assignment.
+    """
+    path = Path(path)
+    suffix = path.suffix.lower()
+    if suffix in (".xls", ".xlsx"):
+        return _read_excel(path)
+    elif suffix in (".csv", ".txt"):
+        return _read_csv(path)
+    else:
+        raise ValueError(f"Unsupported file type: {suffix}")
+
+
+def apply_manual_mapping(
+    raw_df: pd.DataFrame,
+    col_mapping: dict[str, str],
+) -> pd.DataFrame:
+    """Apply a user-defined column mapping and process the DataFrame.
+
+    ``col_mapping`` maps original column names \u2192 internal column names
+    (empty string means \u201cdo not use\u201d).  After renaming, date parsing,
+    numeric coercion and derived-column computation are applied exactly
+    as in :func:`load_file`.
+    """
+    rename = {k: v for k, v in col_mapping.items() if v}
+    df = raw_df.rename(columns=rename)
+    # Drop columns that were not assigned
+    keep = set(rename.values())
+    df = df[[c for c in df.columns if c in keep]].copy()
+    df = _parse_dates(df)
+    df = _coerce_numerics(df)
+    df = _apply_water_split(df)  # resolve WATER_DUAL / WATER_INJ sentinels
+    df = _compute_derived(df)
+    return df
+
 
 def load_file(path: str | Path) -> pd.DataFrame:
     """Load a CSV or Excel file and return a normalised DataFrame.
 
     Steps:
     1. Read raw file (auto-detect encoding and delimiter for CSV).
-    2. Map Russian headers → internal column names.
+    2. Map Russian headers \u2192 internal column names via HEADER_MAP.
     3. Parse date column.
     4. Coerce numeric columns.
     5. Compute derived columns (liquid, cumulatives, water-cut).
     """
-    path = Path(path)
-    suffix = path.suffix.lower()
-
-    if suffix in (".xls", ".xlsx"):
-        df = _read_excel(path)
-    elif suffix in (".csv", ".txt"):
-        df = _read_csv(path)
-    else:
-        raise ValueError(f"Unsupported file type: {suffix}")
-
+    df = read_raw(path)
     df = _rename_columns(df)
     df = _parse_dates(df)
     df = _coerce_numerics(df)
+    df = _apply_water_split(df)  # resolve WATER_DUAL / WATER_INJ sentinels
     df = _compute_derived(df)
     return df
 
 
-# ── Public helpers ───────────────────────────────────────────────────────────
+# ── Public helpers
 
 _DERIVED_COLS = [
     COL_LIQUID, COL_CUM_OIL, COL_CUM_WATER,
@@ -73,7 +108,62 @@ def recompute_derived(df: pd.DataFrame) -> pd.DataFrame:
     return _compute_derived(df.copy())
 
 
-# ── Private helpers ────────────────────────────────────────────────────────────
+# ── Private helpers ──────────────────────────────────────────────────────
+
+
+def _apply_water_split(df: pd.DataFrame) -> pd.DataFrame:
+    """Resolve the COL_WATER_DUAL and COL_WATER_INJ sentinel columns.
+
+    COL_WATER_DUAL (“вода (добыча/закачка)”):
+        Row-by-row logic based on oil production:
+        - oil > 0  → producing well  → WORK_TYPE = НЕФ, water = produced water
+        - oil == 0 → injection well  → WORK_TYPE = НАГ, water = injected water
+        If WORK_TYPE is already set the existing value is preserved.
+
+    COL_WATER_INJ (“закачка воды, только закачка”):
+        All rows flagged as injection (WORK_TYPE = НАГ).
+
+    Both sentinels are renamed to COL_WATER so the rest of the pipeline
+    sees a unified water column.
+    """
+    if COL_WATER_DUAL not in df.columns and COL_WATER_INJ not in df.columns:
+        return df
+
+    # Ensure WORK_TYPE column exists
+    if COL_WORK_TYPE not in df.columns:
+        df = df.copy()
+        df[COL_WORK_TYPE] = ""
+
+    # ─ COL_WATER_DUAL: split by oil production ─────────────────────
+    if COL_WATER_DUAL in df.columns:
+        oil = df[COL_OIL].values if COL_OIL in df.columns else None
+        no_type = df[COL_WORK_TYPE].astype(str).str.strip() == ""
+        if oil is not None:
+            import numpy as np
+            prod_mask = pd.Series(oil, index=df.index) > 0
+            df.loc[prod_mask & no_type, COL_WORK_TYPE] = WORK_TYPE_OIL
+            df.loc[~prod_mask & no_type, COL_WORK_TYPE] = WORK_TYPE_INJ
+        else:
+            # No oil column — cannot determine type; default to production
+            df.loc[no_type, COL_WORK_TYPE] = WORK_TYPE_OIL
+        # Rename sentinel → COL_WATER (handle rare case where COL_WATER already exists)
+        if COL_WATER in df.columns:
+            df[COL_WATER] = df[COL_WATER].where(df[COL_WATER].notna(), df[COL_WATER_DUAL])
+            df = df.drop(columns=[COL_WATER_DUAL])
+        else:
+            df = df.rename(columns={COL_WATER_DUAL: COL_WATER})
+
+    # ─ COL_WATER_INJ: all rows are injection ─────────────────────
+    if COL_WATER_INJ in df.columns:
+        no_type = df[COL_WORK_TYPE].astype(str).str.strip() == ""
+        df.loc[no_type, COL_WORK_TYPE] = WORK_TYPE_INJ
+        if COL_WATER in df.columns:
+            df[COL_WATER] = df[COL_WATER].where(df[COL_WATER].notna(), df[COL_WATER_INJ])
+            df = df.drop(columns=[COL_WATER_INJ])
+        else:
+            df = df.rename(columns={COL_WATER_INJ: COL_WATER})
+
+    return df
 
 
 def _read_csv(path: Path) -> pd.DataFrame:

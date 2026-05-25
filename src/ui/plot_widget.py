@@ -33,7 +33,17 @@ class PlotWidget(QWidget):
     # ── Public API ───────────────────────────────────────────────────────────────────
 
     def clear(self) -> None:
-        self.ax.clear()
+        # Disconnect stale lasso before wiping axes so it can't fire on dead axes
+        if self._lasso is not None:
+            try:
+                self._lasso.set_active(False)
+            except Exception:
+                pass
+            self._lasso = None
+        # Clear the whole figure (removes primary axis + any twinx axes) then
+        # recreate the primary axis so self.ax is always a fresh subplot.
+        self.figure.clear()
+        self.ax = self.figure.add_subplot(111)
         self.canvas.draw_idle()
 
     def redraw(self) -> None:
