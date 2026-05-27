@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QGroupBox,
     QHBoxLayout,
     QInputDialog,
@@ -39,7 +40,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.data.models import (
-    COL_DATE, COL_GAS, COL_OIL, COL_WELL, COL_WORK_TYPE,
+    COL_DATE, COL_GAS, COL_HOURS_WORK, COL_OIL, COL_WELL, COL_WORK_TYPE,
     WellAnalysisScenario, WORK_TYPE_OIL,
 )
 
@@ -206,6 +207,38 @@ class WellAlignmentDialog(QDialog):
         self._btn_pct = QPushButton("Генерировать P90/P50/P10")
         left_lay.addWidget(self._btn_pct)
 
+        # Data filters
+        grp_flt = QGroupBox("Фильтр данных")
+        flt_lay = QVBoxLayout(grp_flt)
+        flt_lay.setSpacing(3)
+
+        row_rate = QHBoxLayout()
+        row_rate.addWidget(QLabel("Мин. дебит:"))
+        self._spn_min_rate = QDoubleSpinBox()
+        self._spn_min_rate.setRange(0.0, 999999.0)
+        self._spn_min_rate.setDecimals(1)
+        self._spn_min_rate.setValue(1.0)
+        self._spn_min_rate.setToolTip(
+            "Месяцы с дебитом ниже этого значения исключаются из анализа."
+        )
+        row_rate.addWidget(self._spn_min_rate)
+        flt_lay.addLayout(row_rate)
+
+        row_days = QHBoxLayout()
+        row_days.addWidget(QLabel("Мин. дней добычи:"))
+        self._spn_min_days = QDoubleSpinBox()
+        self._spn_min_days.setRange(0.0, 31.0)
+        self._spn_min_days.setDecimals(1)
+        self._spn_min_days.setValue(1.0)
+        self._spn_min_days.setToolTip(
+            "Месяцы с числом рабочих дней (часы работы / 24) "
+            "ниже этого значения исключаются из анализа."
+        )
+        row_days.addWidget(self._spn_min_days)
+        flt_lay.addLayout(row_days)
+
+        left_lay.addWidget(grp_flt)
+
         left_lay.addStretch()
 
         # Right (plot)
@@ -245,6 +278,8 @@ class WellAlignmentDialog(QDialog):
         self._btn_undo_excl.clicked.connect(self._on_undo_exclusion)
         self._btn_scenarios.clicked.connect(self._on_open_scenarios)
         self._btn_save_sc.clicked.connect(self._on_save_scenario)
+        self._spn_min_rate.valueChanged.connect(self._on_filter_changed)
+        self._spn_min_days.valueChanged.connect(self._on_filter_changed)
 
     # ── Scenario management ─────────────────────────────────────────────────
 
@@ -369,6 +404,13 @@ class WellAlignmentDialog(QDialog):
             self, "Сохранено",
             f"Сценарий «{sc.name}» сохранён."
         )
+
+    # ── Filter criteria ─────────────────────────────────────────────────────
+
+    def _on_filter_changed(self) -> None:
+        """Redraw when min-rate or min-days criteria change."""
+        self._clear_percentiles()
+        self._draw()
 
     # ── Phase ───────────────────────────────────────────────────────────────
 
@@ -637,9 +679,12 @@ class WellAlignmentDialog(QDialog):
     def _aligned_series(
         self, well: str
     ) -> tuple[np.ndarray, np.ndarray, list[str]] | None:
-        """Return (x_months, y_with_nans_for_excluded, iso_dates).
+        """Return (x_months, y_with_nans_for_excluded_or_filtered, iso_dates).
 
-        y carries NaN at excluded positions so matplotlib renders visible gaps.
+        y carries NaN where:
+          - the month is in the user exclusion set, OR
+          - the rate is below the min-rate filter, OR
+          - the working days are below the min-days filter.
         iso_dates are ISO-formatted strings for each month row.
         """
         prod_col = COL_GAS if self._phase == "gas" else COL_OIL
@@ -659,9 +704,27 @@ class WellAlignmentDialog(QDialog):
         y_raw = agg.values.astype(float)
         iso_dates: list[str] = [str(d)[:10] for d in agg.index]
         y = y_raw.copy()
+
+        # ── Criteria filters (applied before user exclusions) ────────────────
+        min_rate = self._spn_min_rate.value()
+        if min_rate > 0:
+            for i, v in enumerate(y_raw):
+                if np.isfinite(v) and v < min_rate:
+                    y[i] = np.nan
+
+        min_days = self._spn_min_days.value()
+        if min_days > 0 and COL_HOURS_WORK in sub.columns:
+            hours_agg = sub.groupby(COL_DATE)[COL_HOURS_WORK].sum().sort_index()
+            hours_aligned = hours_agg.reindex(agg.index, fill_value=0.0)
+            for i, hours in enumerate(hours_aligned.values):
+                if float(hours) / 24.0 < min_days:
+                    y[i] = np.nan
+
+        # ── User exclusions ──────────────────────────────────────────────────
         for i, iso in enumerate(iso_dates):
             if (well, iso) in self._excluded:
                 y[i] = np.nan
+
         return x, y, iso_dates
 
     # ── Drawing ─────────────────────────────────────────────────────────────
