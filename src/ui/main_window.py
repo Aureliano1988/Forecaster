@@ -878,6 +878,13 @@ class MainWindow(QMainWindow):
                         self.status.showMessage(
                             "Предупреждение: средняя жидкость равна 0 — значение скорректировано до 1 т/мес", 6000
                         )
+        # For non-DCA families the method-space y-series is NOT an oil-rate
+        # series (displacement y is a characteristic ratio; fractional-flow y
+        # is water cut).  Use the physically computed rate from pipeline B so
+        # that fw_last is always derived from actual oil / liquid rates.
+        # _autofit_method() already does this correctly — keep both in sync.
+        if family != "Кривые падения добычи (DCA)":
+            q_last_oil = qo_last_monthly
         # Water cut at last historical month (for fractional-flow anchoring)
         fw_last = (ql_last - q_last_oil) / ql_last if ql_last > 0 else 0.0
 

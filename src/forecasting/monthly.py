@@ -75,7 +75,58 @@ def fractional_qo_anchor(method, fw_last: float, Qo0: float) -> float:
         return float(Qo0)
 
 
-# ── Displacement characteristics ─────────────────────────────────────────────────────────
+def displacement_ql_shift(
+    method,
+    Qo0: float, Ql0: float, Qw0: float,
+    qo_target: float, ql_last: float,
+    qo_last_m: float, qw_last_m: float,
+) -> float:
+    """Find Ql_eff so anchoring at (Ql_eff, Qo0) gives qo_target in the first step.
+
+    Analogous to ``dca_time_shift``: shifts the starting cumulative-liquid
+    position until the displacement model's first incremental oil equals
+    qo_target (the n_avg average monthly oil production).
+
+    For methods whose ``compute_Qo`` does not depend on Ql_next (e.g. WOR,
+    Movmyga), the search bracket collapses and the function falls back to Ql0,
+    preserving the previous behaviour.  The WOR model already produces
+    qo_last_m analytically after the standard anchor, so no shift is needed.
+    """
+    if qo_target <= 0 or ql_last <= 0:
+        return float(Ql0)
+
+    def first_step(Ql_eff: float) -> float:
+        """Oil produced in the first forecast step when anchored at (Ql_eff, Qo0)."""
+        Qw_eff = max(0.0, Ql_eff - float(Qo0))
+        m = anchor_displacement_method(
+            method, float(Qo0), Ql_eff, Qw_eff, qo_last_m, ql_last, qw_last_m
+        )
+        try:
+            Qo_next = float(m.compute_Qo(float(Qo0), Ql_eff + ql_last, ql_last))
+            return max(0.0, Qo_next - float(Qo0))
+        except Exception:
+            return 0.0
+
+    def f(Ql_eff: float) -> float:
+        return first_step(Ql_eff) - qo_target
+
+    # For most models first-step oil decreases monotonically as Ql_eff rises
+    # (higher Ql → higher WOR → less incremental oil per unit liquid).
+    search_range = max(float(Ql0) * 0.5, ql_last * 12.0)
+    lo = max(0.0, float(Ql0) - search_range)
+    hi = float(Ql0) + search_range
+
+    if f(lo) * f(hi) >= 0:
+        return float(Ql0)   # target not achievable in window — fall back
+
+    from scipy.optimize import brentq
+    try:
+        return float(brentq(f, lo, hi, xtol=ql_last * 1e-4, maxiter=200))
+    except Exception:
+        return float(Ql0)
+
+
+# ── Displacement characteristics ────────────────────────────────────────────────────
 
 def build_displacement_forecast(
     method,
@@ -99,13 +150,22 @@ def build_displacement_forecast(
     if ql_last <= 0 or max_months <= 0:
         return series
 
-    # Shift intercept so model passes through last historical cumulative point
+    # Shift the starting cumulative liquid so the first forecast month's oil
+    # equals qo_last_monthly, analogous to dca_time_shift for DCA methods.
+    # Falls back to Ql0 for models insensitive to Ql_eff (WOR, Movmyga).
+    Ql_eff = displacement_ql_shift(
+        method, Qo0, Ql0, Qw0, qo_last_monthly, ql_last,
+        qo_last_monthly, qw_last_monthly,
+    )
+    Qw_eff = max(0.0, Ql_eff - float(Qo0))
+
+    # Anchor the method at the found starting position
     method = anchor_displacement_method(
-        method, Qo0, Ql0, Qw0, qo_last_monthly, ql_last, qw_last_monthly
+        method, Qo0, Ql_eff, Qw_eff, qo_last_monthly, ql_last, qw_last_monthly
     )
 
     Qo_cum = float(Qo0)
-    Ql_cum = float(Ql0)
+    Ql_cum = Ql_eff
     fc_Qo = fc_Qw = fc_Ql = 0.0
 
     for _ in range(max_months):
