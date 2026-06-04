@@ -7,6 +7,9 @@ from matplotlib.figure import Figure
 from matplotlib.widgets import LassoSelector
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
+from src.ui.hover_tooltip import install_hover_tooltip
+from src.ui.legend_helper import fit_legend
+
 
 class PlotWidget(QWidget):
     """Embeds a Matplotlib figure inside a Qt widget.
@@ -30,6 +33,8 @@ class PlotWidget(QWidget):
         layout.addWidget(self.toolbar)
         layout.addWidget(self.canvas)
 
+        install_hover_tooltip(self.canvas, self.figure)
+
     # ── Public API ───────────────────────────────────────────────────────────────────
 
     def clear(self) -> None:
@@ -47,7 +52,7 @@ class PlotWidget(QWidget):
         self.canvas.draw_idle()
 
     def redraw(self) -> None:
-        self.ax.legend(fontsize=8)
+        fit_legend(self.ax)
         self.canvas.draw_idle()
 
     def enable_lasso_selector(self, callback) -> None:

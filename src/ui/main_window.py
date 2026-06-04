@@ -22,6 +22,7 @@ from src.data.models import (
     COL_CUM_GAS,
     COL_DATE,
     COL_GAS,
+    COL_HOURS_WORK,
     COL_LIQUID,
     COL_OIL,
     COL_WATER,
@@ -170,6 +171,7 @@ class MainWindow(QMainWindow):
         self.method_panel.edit_toggled.connect(self._on_edit_toggle)
         self.data_panel.filter_applied.connect(self._on_filter_applied)
         self.data_panel.chk_active_wells.stateChanged.connect(self._on_plot_data)
+        self.method_panel.cmb_dca_mode.currentIndexChanged.connect(self._on_plot_data)
 
     # ── Application close
 
@@ -485,8 +487,9 @@ class MainWindow(QMainWindow):
         if not self._scenarios:
             return
         sc = self._scenarios[self._active_scenario_idx]
-        sc.wells   = list(self._selected_wells)
-        sc.results = dict(self._saved_results)
+        sc.wells    = list(self._selected_wells)
+        sc.results  = dict(self._saved_results)
+        sc.dca_mode = self.method_panel.get_dca_mode()
 
     def _load_scenario_into_buffers(self, idx: int) -> None:
         """Load scenario *idx* into working buffers and repopulate the well list.
@@ -504,8 +507,9 @@ class MainWindow(QMainWindow):
         self._lasso_include_path = None
         self._lasso_exclude_paths.clear()
 
-        # Apply phase to the method panel (restricts families for gas)
+        # Apply phase and DCA mode to the method panel
         self.method_panel.set_phase(getattr(sc, "phase", "oil"))
+        self.method_panel.set_dca_mode(getattr(sc, "dca_mode", "production"))
 
         well_set  = set(sc.wells)
         all_wells = (
@@ -573,10 +577,18 @@ class MainWindow(QMainWindow):
                 elif family == "Кривые падения добычи (DCA)":
                     _phase = self._active_phase()
                     _dca_col = COL_GAS if _phase == "gas" else COL_OIL
-                    ts = self._monthly_series(sub, _dca_col)
+                    _dca_mode = self.method_panel.get_dca_mode()
+                    if _dca_mode == "rate":
+                        ts = self._daily_rate_series(sub, _dca_col)
+                    else:
+                        ts = self._monthly_series(sub, _dca_col)
                     if ts is not None:
-                        _dca_lbl = "Добыча газа (факт)" if _phase == "gas" else "Добыча нефти (факт)"
-                        _dca_y_lbl = "Добыча газа, м\u00b3/мес" if _phase == "gas" else "Добыча нефти, т/мес"
+                        if _dca_mode == "rate":
+                            _dca_lbl = "Дебит газа (факт)" if _phase == "gas" else "Дебит нефти (факт)"
+                            _dca_y_lbl = "Дебит газа, м\u00b3/сут" if _phase == "gas" else "Дебит нефти, т/сут"
+                        else:
+                            _dca_lbl = "Добыча газа (факт)" if _phase == "gas" else "Добыча нефти (факт)"
+                            _dca_y_lbl = "Добыча газа, м\u00b3/мес" if _phase == "gas" else "Добыча нефти, т/мес"
                         ax.plot(range(len(ts)), ts.values, "o-", ms=3, label=_dca_lbl)
                         ax.set_xlabel("Месяц")
                         ax.set_ylabel(_dca_y_lbl)
@@ -885,8 +897,23 @@ class MainWindow(QMainWindow):
         # _autofit_method() already does this correctly — keep both in sync.
         if family != "Кривые падения добычи (DCA)":
             q_last_oil = qo_last_monthly
+
+        # ── DCA rate-to-monthly conversion ─────────────────────────────────
+        _dca_mode = self.method_panel.get_dca_mode()
+        _rate_to_monthly = 1.0
+        _ke = 1.0
+        if family == "Кривые падения добычи (DCA)" and _dca_mode == "rate":
+            if sub is not None:
+                _ke = self._compute_ke(sub, n_avg)
+            _rate_to_monthly = 30.4375 * _ke
+            # Derive anchor daily rate from monthly production so that
+            # q_last_oil * rate_to_monthly == qo_last_monthly exactly,
+            # ensuring the first forecast month matches the historical average.
+            if _rate_to_monthly > 0:
+                q_last_oil = qo_last_monthly / _rate_to_monthly
+
         # Water cut at last historical month (for fractional-flow anchoring)
-        fw_last = (ql_last - q_last_oil) / ql_last if ql_last > 0 else 0.0
+        fw_last = (ql_last - qo_last_monthly) / ql_last if ql_last > 0 else 0.0
 
         # ── Build monthly series ──────────────────────────────────────────
         monthly: ForecastSeries | None = None
@@ -906,7 +933,9 @@ class MainWindow(QMainWindow):
                 # Anchor curve to last historical rate before projecting
                 dca_t_shift = dca_time_shift(self._current_method, q_last_oil)
                 monthly = build_dca_forecast(
-                    self._current_method, x_last, q_last_oil, ql_last, horizon, wor_limit, min_oil,
+                    self._current_method, x_last, q_last_oil, ql_last,
+                    horizon, wor_limit, min_oil,
+                    rate_to_monthly=_rate_to_monthly,
                 )
             elif family == "Фракционный поток":
                 # Find Qo_eff where fw(Qo_eff) = fw_last, then anchor from there
@@ -967,6 +996,8 @@ class MainWindow(QMainWindow):
                 f"  НТИК: {uur:,.0f} т\n"
                 f"  ВНФ (посл.): {monthly.wor_last:.2f}"
             )
+            if _dca_mode == "rate":
+                result_text += f"\n  КЭ: {_ke:.3f}"
         self.method_panel.show_result(result_text)
 
         msg = f"Прогноз: {actual_duration} мес."
@@ -1058,7 +1089,11 @@ class MainWindow(QMainWindow):
 
         elif family == "Кривые падения добычи (DCA)":
             _dca_col = COL_GAS if self._active_phase() == "gas" else COL_OIL
-            ts = self._monthly_series(sub, _dca_col)
+            _dca_mode = self.method_panel.get_dca_mode()
+            if _dca_mode == "rate":
+                ts = self._daily_rate_series(sub, _dca_col)
+            else:
+                ts = self._monthly_series(sub, _dca_col)
             if ts is None:
                 return None, None
             x = np.arange(len(ts), dtype=float)
@@ -1166,6 +1201,59 @@ class MainWindow(QMainWindow):
         agg = sub.groupby(COL_DATE)[col].sum().sort_index()
         agg = agg[agg > 0]
         return agg if len(agg) > 0 else None
+
+    @staticmethod
+    def _daily_rate_series(sub: pd.DataFrame, col: str) -> pd.Series | None:
+        """Aggregate daily rate = Σ(per-well production / producing_days) by date.
+
+        For each row: daily_rate = production / (hours_work / 24).
+        Rows with zero hours_work are excluded.  Per-well daily rates
+        are then summed across wells for each date.
+        """
+        if (
+            col not in sub.columns
+            or COL_DATE not in sub.columns
+            or COL_HOURS_WORK not in sub.columns
+        ):
+            return None
+        df = sub[[COL_DATE, COL_WELL, col, COL_HOURS_WORK]].copy()
+        days = df[COL_HOURS_WORK] / 24.0
+        mask = days > 0
+        df = df[mask].copy()
+        if df.empty:
+            return None
+        df["_rate"] = df[col] / (df[COL_HOURS_WORK] / 24.0)
+        agg = df.groupby(COL_DATE)["_rate"].sum().sort_index()
+        agg = agg[agg > 0]
+        return agg if len(agg) > 0 else None
+
+    @staticmethod
+    def _compute_ke(sub: pd.DataFrame, n_avg: int) -> float:
+        """Average efficiency factor (КЭ) over the last *n_avg* months.
+
+        КЭ = Σ(hours_work) / Σ(n_wells_per_date × days_in_month × 24)
+        Returns a value in (0, 1].  Falls back to 1.0 when hours_work
+        is unavailable or the computation is degenerate.
+        """
+        if COL_HOURS_WORK not in sub.columns or COL_DATE not in sub.columns:
+            return 1.0
+        agg_hours = sub.groupby(COL_DATE)[COL_HOURS_WORK].sum().sort_index()
+        n_wells = sub.groupby(COL_DATE)[COL_WELL].nunique().sort_index()
+        if agg_hours.empty:
+            return 1.0
+        tail_hours = agg_hours.iloc[-n_avg:]
+        tail_wells = n_wells.reindex(tail_hours.index, fill_value=1)
+
+        total_prod_hours = 0.0
+        total_cal_hours = 0.0
+        for dt in tail_hours.index:
+            dim = pd.Timestamp(dt).days_in_month
+            nw = int(tail_wells.loc[dt])
+            total_prod_hours += float(tail_hours.loc[dt])
+            total_cal_hours += dim * 24.0 * nw
+        if total_cal_hours <= 0:
+            return 1.0
+        return min(1.0, total_prod_hours / total_cal_hours)
 
     # ── Trend editor ────────────────────────────────────────────────────────
 
@@ -1595,13 +1683,25 @@ class MainWindow(QMainWindow):
             q_last_oil, _ = self._avg_last(y, n_avg) if len(y) else (0.0, 0)
         else:
             q_last_oil = qo_last_m
-        fw_last = (ql_last - q_last_oil) / ql_last if ql_last > 0 else 0.0
 
         horizon   = self.method_panel.get_horizon()
         wor_limit = self.method_panel.get_wor_limit()
         min_oil   = self.method_panel.get_min_oil()
         x_last    = float(x[-1])
         dx        = (x[-1] - x[0]) / max(len(x) - 1, 1) if len(x) > 1 else 1.0
+
+        # ─ DCA rate-to-monthly conversion
+        _dca_mode = self.method_panel.get_dca_mode()
+        _rate_to_monthly = 1.0
+        _ke = 1.0
+        if family == "Кривые падения добычи (DCA)" and _dca_mode == "rate":
+            if sub is not None:
+                _ke = self._compute_ke(sub, n_avg)
+            _rate_to_monthly = 30.4375 * _ke
+            if _rate_to_monthly > 0:
+                q_last_oil = qo_last_m / _rate_to_monthly
+
+        fw_last = (ql_last - qo_last_m) / ql_last if ql_last > 0 else 0.0
 
         # ─ Monthly forecast
         monthly = None
@@ -1616,7 +1716,9 @@ class MainWindow(QMainWindow):
             elif family == "Кривые падения добычи (DCA)":
                 dca_t_shift = dca_time_shift(method, q_last_oil)
                 monthly = build_dca_forecast(
-                    method, x_last, q_last_oil, ql_last, horizon, wor_limit, min_oil,
+                    method, x_last, q_last_oil, ql_last,
+                    horizon, wor_limit, min_oil,
+                    rate_to_monthly=_rate_to_monthly,
                 )
             elif family == "Фракционный поток":
                 Qo_eff_frac = fractional_qo_anchor(method, fw_last, Qo_last)
@@ -1655,6 +1757,8 @@ class MainWindow(QMainWindow):
                 f"  НТИК: {uur:,.0f} т\n"
                 f"  ВНФ (посл.): {monthly.wor_last:.2f}"
             )
+            if _dca_mode == "rate":
+                result_text += f"\n  КЭ: {_ke:.3f}"
 
         saved = SavedMethodResult(
             method_name=method.get_name(),
@@ -1790,7 +1894,7 @@ class MainWindow(QMainWindow):
             "ql": ql,
             "Qo": Qo,
             "Ql": Ql,
-            "WOR": np.where(qo > 0, qw / qo, 0.0),
+            "WOR": np.divide(qw, qo, out=np.zeros_like(qo), where=qo > 0),
         }
 
         eff_stoiip = sc.stoiip if sc.stoiip > 0 else self._stoiip
@@ -1931,7 +2035,7 @@ class MainWindow(QMainWindow):
                     "ql": ql,
                     "Qo": Qo,
                     "Ql": Ql,
-                    "WOR": np.where(qo > 0, qw / qo, 0.0),
+                    "WOR": np.divide(qw, qo, out=np.zeros_like(qo), where=qo > 0),
                 }
                 # RF and HCPVI use the active scenario's effective values
                 eff_stoiip_hist = self._sc_stoiip()

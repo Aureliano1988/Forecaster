@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -64,11 +65,16 @@ class DataPanel(QWidget):
         grp = QGroupBox("Скважины")
         grp_layout = QVBoxLayout(grp)
         self.well_list = QListWidget()
-        self.well_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+        self.well_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         grp_layout.addWidget(self.well_list)
 
-        self.btn_select_all = QPushButton("Выбрать все")
-        grp_layout.addWidget(self.btn_select_all)
+        row_sel = QHBoxLayout()
+        self.btn_select_all = QPushButton("Все")
+        self.btn_select_none = QPushButton("Снять")
+        row_sel.addWidget(self.btn_select_all)
+        row_sel.addWidget(self.btn_select_none)
+        row_sel.addStretch()
+        grp_layout.addLayout(row_sel)
 
         self.btn_filter = QPushButton("Фильтр скважин…")
         grp_layout.addWidget(self.btn_filter)
@@ -89,6 +95,7 @@ class DataPanel(QWidget):
 
         # ── Connections ────────────────────────────────────────────────────────
         self.btn_select_all.clicked.connect(self._select_all)
+        self.btn_select_none.clicked.connect(self._deselect_all)
         self.btn_filter.clicked.connect(self._on_load_filter)
         self.well_list.itemSelectionChanged.connect(self._on_selection)
 
@@ -170,6 +177,9 @@ class DataPanel(QWidget):
 
     def _select_all(self) -> None:
         self.well_list.selectAll()
+
+    def _deselect_all(self) -> None:
+        self.well_list.clearSelection()
 
     def _on_load_filter(self) -> None:
         self.load_well_filter()

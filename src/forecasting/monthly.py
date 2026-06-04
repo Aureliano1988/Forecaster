@@ -246,6 +246,7 @@ def build_dca_forecast(
     max_months: int,
     wor_limit: float = 99.0,
     min_oil: float = 0.0,
+    rate_to_monthly: float = 1.0,
 ) -> ForecastSeries:
     """Monthly forecast for Arps DCA methods.
 
@@ -255,6 +256,10 @@ def build_dca_forecast(
     months use predict(t_shift + 1), predict(t_shift + 2), …
 
     ql = ql_last = const (liquid rate assumption).
+
+    When *rate_to_monthly* > 1 the model is assumed to predict daily
+    rates; each prediction is multiplied by this factor to obtain
+    monthly production.  Set to ``30.4375 * КЭ`` for daily-rate mode.
     """
     series = ForecastSeries()
     if ql_last <= 0 or max_months <= 0:
@@ -264,7 +269,7 @@ def build_dca_forecast(
     fc_Qo = fc_Qw = fc_Ql = 0.0
 
     for i in range(1, max_months + 1):
-        qo = float(method.predict(np.array([t_shift + i]))[0])
+        qo = float(method.predict(np.array([t_shift + i]))[0]) * rate_to_monthly
         if qo <= 0:
             break
         if min_oil > 0 and qo < min_oil:

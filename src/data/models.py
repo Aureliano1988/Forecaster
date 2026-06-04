@@ -154,3 +154,4 @@ class ForecastScenario:
     stoiip:  float = 0.0   # initial oil in place for this scenario (0 = use project default)
     hcpv:    float = 0.0   # hydrocarbon pore volume for this scenario (0 = use project default)
     phase:   str   = "oil" # forecasting phase: "oil" | "gas"
+    dca_mode: str  = "production"  # "production" (monthly, т/мес) or "rate" (daily, т/сут)

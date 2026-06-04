@@ -101,7 +101,7 @@ class WellVintageDialog(QDialog):
         grp_wells = QGroupBox("Скважины")
         gw_lay = QVBoxLayout(grp_wells)
         self._lst = QListWidget()
-        self._lst.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+        self._lst.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         gw_lay.addWidget(self._lst)
 
         row_sel = QHBoxLayout()
@@ -135,6 +135,9 @@ class WellVintageDialog(QDialog):
         self._nav = NavigationToolbar2QT(self._canvas, right)
         right_lay.addWidget(self._nav)
         right_lay.addWidget(self._canvas)
+
+        from src.ui.hover_tooltip import install_hover_tooltip
+        install_hover_tooltip(self._canvas, self._fig)
 
         btns = QHBoxLayout()
         btn_clip     = QPushButton("Копировать график")
@@ -350,12 +353,8 @@ class WellVintageDialog(QDialog):
             f"Группировка скважин по годам ввода  ({n_wells} скв., {len(years)} групп)"
         )
 
-        handles, labels = ax.get_legend_handles_labels()
-        if handles:
-            leg = ax.legend(handles, labels, fontsize=8, loc="upper right",
-                            ncol=max(1, len(labels) // 12))
-            if leg is not None:
-                leg.set_draggable(True)
+        from src.ui.legend_helper import fit_legend
+        fit_legend(ax, loc="upper right")
 
         ax.grid(True, alpha=0.3)
         self._canvas.draw_idle()

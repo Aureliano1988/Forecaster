@@ -128,6 +128,7 @@ def save_fcst_file(
             "stoiip": sc.stoiip,
             "hcpv":   sc.hcpv,
             "phase":  getattr(sc, "phase", "oil"),
+            "dca_mode": getattr(sc, "dca_mode", "production"),
             "results": _serialise_results(sc.results),
         }
         for sc in scenarios
@@ -236,6 +237,7 @@ def load_fcst_file(path: str | Path) -> dict:
                 stoiip=float(sc.get("stoiip", 0.0)) or proj_stoiip,
                 hcpv=float(sc.get("hcpv",   0.0)) or proj_hcpv,
                 phase=sc.get("phase", "oil"),
+                dca_mode=sc.get("dca_mode", "production"),
             )
             for i, sc in enumerate(data["scenarios"])
         ]

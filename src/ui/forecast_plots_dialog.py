@@ -322,6 +322,9 @@ class ForecastPlotsDialog(QDialog):
         right_lay.addWidget(self._nav)
         right_lay.addWidget(self._canvas)
 
+        from src.ui.hover_tooltip import install_hover_tooltip
+        install_hover_tooltip(self._canvas, self._fig)
+
         btns = QHBoxLayout()
         btn_clip = QPushButton("Копировать график")
         btn_clip.clicked.connect(self._to_clipboard)
@@ -848,15 +851,8 @@ class ForecastPlotsDialog(QDialog):
             except Exception:
                 pass
 
-        h, l = ax1.get_legend_handles_labels()
-        if ax2:
-            h2, l2 = ax2.get_legend_handles_labels()
-            h += h2; l += l2
-        if h:
-            fsize = 6 if n_items > 5 else 7
-            leg = ax1.legend(h, l, fontsize=fsize, loc="best")
-            if leg is not None:
-                leg.set_draggable(True)
+        from src.ui.legend_helper import fit_legend
+        fit_legend(ax1, extra_ax=ax2, loc="best")
 
         ax1.grid(True, alpha=0.3)
         self._canvas.draw_idle()

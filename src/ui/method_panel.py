@@ -97,6 +97,20 @@ class MethodPanel(QWidget):
             "N > 1 — прогноз стартует со средней добычи за последние N месяцев."
         )
         grp2_layout.addWidget(self.spn_n_avg)
+
+        # DCA mode selector (visible only for DCA family)
+        self._lbl_dca_mode = QLabel("Режим DCA:")
+        grp2_layout.addWidget(self._lbl_dca_mode)
+        self.cmb_dca_mode = QComboBox()
+        self.cmb_dca_mode.addItem("Добыча", "production")
+        self.cmb_dca_mode.addItem("Дебит", "rate")
+        self.cmb_dca_mode.setToolTip(
+            "Добыча — падение месячной добычи (т/мес или м³/мес).\n"
+            "Дебит — падение суточного дебита (т/сут или м³/сут);\n"
+            "для прогноза используется КЭ (коэфф. эксплуатации)."
+        )
+        grp2_layout.addWidget(self.cmb_dca_mode)
+
         layout.addWidget(grp2)
 
         # ── Action buttons ───────────────────────────────────────────────────
@@ -138,6 +152,7 @@ class MethodPanel(QWidget):
 
         # Initial population
         self._update_methods()
+        self._update_dca_mode_visibility()
 
     # ── Public ───────────────────────────────────────────────────────────────
 
@@ -216,6 +231,18 @@ class MethodPanel(QWidget):
         """Return the currently active phase."""
         return self._phase
 
+    def get_dca_mode(self) -> str:
+        """Return 'production' or 'rate'."""
+        return self.cmb_dca_mode.currentData() or "production"
+
+    def set_dca_mode(self, mode: str) -> None:
+        """Set the DCA mode combobox without emitting signals."""
+        idx = self.cmb_dca_mode.findData(mode)
+        if idx >= 0:
+            self.cmb_dca_mode.blockSignals(True)
+            self.cmb_dca_mode.setCurrentIndex(idx)
+            self.cmb_dca_mode.blockSignals(False)
+
     # ── Slots ────────────────────────────────────────────────────────────────
 
     def _update_methods(self) -> None:
@@ -224,3 +251,9 @@ class MethodPanel(QWidget):
         family = families.get(self.get_family_name(), [])
         for cls in family:
             self.cmb_method.addItem(cls().get_name())
+        self._update_dca_mode_visibility()
+
+    def _update_dca_mode_visibility(self) -> None:
+        is_dca = self.get_family_name() == "Кривые падения добычи (DCA)"
+        self._lbl_dca_mode.setVisible(is_dca)
+        self.cmb_dca_mode.setVisible(is_dca)

@@ -153,7 +153,7 @@ class WellAlignmentDialog(QDialog):
         grp_wells = QGroupBox("Скважины")
         gw_lay = QVBoxLayout(grp_wells)
         self._lst = QListWidget()
-        self._lst.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+        self._lst.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         gw_lay.addWidget(self._lst)
 
         row_sel = QHBoxLayout()
@@ -254,6 +254,9 @@ class WellAlignmentDialog(QDialog):
         self._nav = NavigationToolbar2QT(self._canvas, right)
         right_lay.addWidget(self._nav)
         right_lay.addWidget(self._canvas)
+
+        from src.ui.hover_tooltip import install_hover_tooltip
+        install_hover_tooltip(self._canvas, self._fig)
 
         btns = QHBoxLayout()
         btn_clip = QPushButton("Копировать график")
@@ -825,11 +828,8 @@ class WellAlignmentDialog(QDialog):
                 pct_lbls = set(_PCT_LABELS.values())
                 handles = [h for h, lbl in zip(handles, labels) if lbl in pct_lbls]
                 labels  = [lbl for lbl in labels if lbl in pct_lbls]
-            fsize = 6 if len(selected) > 15 else 7
-            leg = ax.legend(handles, labels, fontsize=fsize,
-                            loc="upper right", ncol=max(1, len(labels) // 8))
-            if leg is not None:
-                leg.set_draggable(True)
+            from src.ui.legend_helper import fit_legend
+            fit_legend(ax, handles, labels, loc="upper right")
 
         ax.grid(True, alpha=0.3)
         self._canvas.draw_idle()
