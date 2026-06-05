@@ -157,6 +157,7 @@ class MainWindow(QMainWindow):
         wells_menu.addAction(_act("Приведённая добыча по скважинам…", self._on_well_alignment))
         wells_menu.addSeparator()
         wells_menu.addAction(_act("Группировка скважин по годам ввода…", self._on_well_vintage))
+        wells_menu.addAction(_act("Графики Чена…", self._on_chan_plot))
 
         # ── Connections ──────────────────────────────────────────────────────
         self.data_panel.btn_load.clicked.connect(self._on_load)
@@ -1866,6 +1867,15 @@ class MainWindow(QMainWindow):
             return
         from src.ui.well_vintage_dialog import WellVintageDialog
         dlg = WellVintageDialog(self.df, parent=self)
+        dlg.exec()
+
+    def _on_chan_plot(self) -> None:
+        """Open the Chan diagnostic plot window."""
+        if self.df is None:
+            self.status.showMessage("Данные не загружены", 3000)
+            return
+        from src.ui.chan_plot_dialog import ChanPlotDialog
+        dlg = ChanPlotDialog(self.df, parent=self)
         dlg.exec()
 
     def _compute_scenario_hist(self, sc) -> "dict | None":
