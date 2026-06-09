@@ -786,6 +786,19 @@ class WellAlignmentDialog(QDialog):
             if (well, iso) in self._excluded:
                 y[i] = np.nan
 
+        # ── Trim leading NaNs so month 1 = first valid (non-filtered) value ──
+        first_valid = -1
+        for i in range(len(y)):
+            if np.isfinite(y[i]) and y[i] > 0:
+                first_valid = i
+                break
+        if first_valid < 0:
+            return None  # all values filtered out
+        if first_valid > 0:
+            y = y[first_valid:]
+            iso_dates = iso_dates[first_valid:]
+        x = np.arange(1, len(y) + 1, dtype=float)
+
         return x, y, iso_dates
 
     # ── Drawing ─────────────────────────────────────────────────────────────

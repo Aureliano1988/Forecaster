@@ -107,6 +107,7 @@ def save_fcst_file(
     stoiip: float = 0.0,
     hcpv: float = 0.0,
     well_analysis_scenarios=None,             # list[WellAnalysisScenario] | None
+    col_mapping: dict[str, str] | None = None,
 ) -> None:
     """Save all forecast scenarios to a .fcst v2.0 JSON file.
 
@@ -129,6 +130,7 @@ def save_fcst_file(
             "hcpv":   sc.hcpv,
             "phase":  getattr(sc, "phase", "oil"),
             "dca_mode": getattr(sc, "dca_mode", "production"),
+            "group":    getattr(sc, "group", ""),
             "results": _serialise_results(sc.results),
         }
         for sc in scenarios
@@ -145,6 +147,7 @@ def save_fcst_file(
         "well_analysis_scenarios": _serialise_well_analysis_scenarios(
             well_analysis_scenarios or []
         ),
+        "col_mapping": col_mapping or {},
     }
     Path(path).write_text(
         json.dumps(data, ensure_ascii=False, indent=2),
@@ -238,6 +241,7 @@ def load_fcst_file(path: str | Path) -> dict:
                 hcpv=float(sc.get("hcpv",   0.0)) or proj_hcpv,
                 phase=sc.get("phase", "oil"),
                 dca_mode=sc.get("dca_mode", "production"),
+                group=sc.get("group", ""),
             )
             for i, sc in enumerate(data["scenarios"])
         ]
@@ -263,4 +267,5 @@ def load_fcst_file(path: str | Path) -> dict:
         "hcpv":   proj_hcpv,
         "scenarios": scenarios,
         "well_analysis_scenarios": well_analysis_scenarios,
+        "col_mapping": data.get("col_mapping", {}),
     }

@@ -70,6 +70,7 @@ class MainWindow(QMainWindow):
         self._project_name: str = ""              # display title for the project
         self._fit_result_text: str = ""           # text produced by the last fit
         self._source_files: list[str] = []        # paths of loaded data files
+        self._col_mapping: dict[str, str] = {}    # column mapping used at import time
         self._current_save_path: str = ""         # path of last saved .fcst file
         self._saved_results: dict[str, SavedMethodResult] = {}  # keyed by family|method
 
@@ -154,6 +155,8 @@ class MainWindow(QMainWindow):
         forecast_menu.addSeparator()
         forecast_menu.addAction(_act("Сводка прогнозов…",  self._on_forecast_summary))
         forecast_menu.addAction(_act("Графики прогнозов…", self._on_forecast_plots))
+        forecast_menu.addSeparator()
+        forecast_menu.addAction(_act("Экспорт данных…",    self._on_export_data))
 
         # Скважины
         wells_menu = menu.addMenu("Скважины")
@@ -312,6 +315,7 @@ class MainWindow(QMainWindow):
         if dlg.exec() != DataImportDialog.DialogCode.Accepted:
             return
         col_mapping = dlg.result_mapping()
+        self._col_mapping = col_mapping  # persist for project save/reload
 
         # ── Apply mapping + validate every file ─────────────────────
         valid_dfs: list[tuple[str, pd.DataFrame]] = []
@@ -2143,7 +2147,25 @@ class MainWindow(QMainWindow):
         )
         dlg.exec()
 
-    # ── Save / load project ───────────────────────────────────────────────
+    def _on_export_data(self) -> None:
+        """Open the export data dialog for cross-scenario comparison."""
+        self._commit_active_scenario()
+        has_any = any(
+            any(r.monthly and r.monthly.duration > 0 for r in sc.results.values())
+            for sc in self._scenarios
+        )
+        if not has_any:
+            self.status.showMessage("Нет рассчитанных прогнозов для экспорта", 3000)
+            return
+        from src.ui.export_data_dialog import ExportDataDialog
+        dlg = ExportDataDialog(
+            self._scenarios,
+            project_name=self._project_name,
+            parent=self,
+        )
+        dlg.exec()
+
+    # ── Save / load project ─────────────────────────────────────────────
 
     def _on_load_project(self) -> None:
         """Open a .fcst project file and restore all saved results."""
@@ -2194,7 +2216,14 @@ class MainWindow(QMainWindow):
                 else:
                     continue
             try:
-                df_i = load_file(resolved)
+                # Use stored column mapping if available; fall back to auto-detect
+                col_map = project.get("col_mapping", {})
+                if col_map:
+                    raw = read_raw(resolved)
+                    file_map = {c: col_map.get(c, "") for c in raw.columns}
+                    df_i = apply_manual_mapping(raw, file_map)
+                else:
+                    df_i = load_file(resolved)
                 if validate(df_i).is_valid:
                     loaded_dfs.append(df_i)
                     loaded_paths.append(resolved)
@@ -2214,7 +2243,8 @@ class MainWindow(QMainWindow):
             self._source_files = loaded_paths
         else:
             self.df = None
-            self._source_files = []
+            # Preserve original paths so they can be relocated on next open
+            self._source_files = list(src_paths)
 
         # ── Restore project state ───────────────────────
         self._scenarios                = scenarios
@@ -2224,6 +2254,7 @@ class MainWindow(QMainWindow):
         self._stoiip                   = project.get("stoiip", 0.0)
         self._hcpv                     = project.get("hcpv", 0.0)
         self._well_analysis_scenarios  = project.get("well_analysis_scenarios", [])
+        self._col_mapping              = project.get("col_mapping", {})
 
         # Load scenario 0 into working buffers (no commit needed — nothing to commit)
         self._load_scenario_into_buffers(0)
@@ -2299,6 +2330,7 @@ class MainWindow(QMainWindow):
                 stoiip=self._stoiip,
                 hcpv=self._hcpv,
                 well_analysis_scenarios=self._well_analysis_scenarios,
+                col_mapping=self._col_mapping,
             )
             self.status.showMessage(f"Проект сохранён: {path}", 5000)
             return True

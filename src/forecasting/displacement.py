@@ -121,7 +121,7 @@ class Nazarov(LinearDisplacement):
     @staticmethod
     def prepare_xy(Qo, Ql, Qw, qo, ql, qw):
         mask = (Qw > 0) & (Qo > 0)
-        return Qw[mask], (Qw / Qo)[mask]
+        return Qw[mask], np.divide(Qw, Qo, out=np.zeros_like(Qo), where=Qo > 0)[mask]
 
     def compute_Qo(self, Qo_prev, Ql_next, ql_last):
         # predict(Qw) = a + b*Qw = Qw/Qo  →  Qo = Qw/(a + b*Qw)
@@ -204,7 +204,7 @@ class Movmyga(LinearDisplacement):
     @staticmethod
     def prepare_xy(Qo, Ql, Qw, qo, ql, qw):
         mask = ql > 0
-        return (qo / ql)[mask], Qo[mask]
+        return np.divide(qo, ql, out=np.zeros_like(qo), where=ql > 0)[mask], Qo[mask]
 
     def compute_Qo(self, Qo_prev, Ql_next, ql_last):
         denom = self.b - ql_last
@@ -230,7 +230,7 @@ class Varukshin(LinearDisplacement):
 
     @staticmethod
     def prepare_xy(Qo, Ql, Qw, qo, ql, qw):
-        ratio = np.where(ql > 0, qo / ql, 0.0)
+        ratio = np.divide(qo, ql, out=np.zeros_like(qo), where=ql > 0)
         mask = ratio > 0
         return np.log(ratio[mask]), Ql[mask]
 
@@ -258,7 +258,7 @@ class WOR(LinearDisplacement):
 
     @staticmethod
     def prepare_xy(Qo, Ql, Qw, qo, ql, qw):
-        ratio = np.where(qo > 0, qw / qo, 0.0)
+        ratio = np.divide(qw, qo, out=np.zeros_like(qw), where=qo > 0)
         mask = ratio > 0
         return Qo[mask], np.log(ratio[mask])
 
@@ -333,7 +333,7 @@ class IFP(LinearDisplacement):
     @staticmethod
     def prepare_xy(Qo, Ql, Qw, qo, ql, qw):
         mask = (Qo > 0) & (Qw > 0)
-        return Qo[mask], np.log((Qw / Qo)[mask])
+        return Qo[mask], np.log(np.divide(Qw, Qo, out=np.ones_like(Qw), where=Qo > 0)[mask])
 
     def compute_Qo(self, Qo_prev, Ql_next, ql_last):
         from scipy.optimize import brentq

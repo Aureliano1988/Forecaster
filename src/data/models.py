@@ -161,3 +161,4 @@ class ForecastScenario:
     hcpv:    float = 0.0   # hydrocarbon pore volume for this scenario (0 = use project default)
     phase:   str   = "oil" # forecasting phase: "oil" | "gas"
     dca_mode: str  = "production"  # "production" (monthly, т/мес) or "rate" (daily, т/сут)
+    group:    str  = ""            # group name ("" = ungrouped)

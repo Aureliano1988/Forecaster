@@ -84,7 +84,7 @@ class BuckleyLeverettSemiLog(ForecastMethod):
 
     def predict(self, x: np.ndarray) -> np.ndarray:
         """Return predicted water cut fw."""
-        ln_one_minus_fw = self.a + self.b * x
+        ln_one_minus_fw = np.clip(self.a + self.b * x, -300, 300)
         fw = 1.0 - np.exp(ln_one_minus_fw)
         return np.clip(fw, 0.0, 1.0)
 
