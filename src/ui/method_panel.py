@@ -25,8 +25,8 @@ _FAMILIES: dict[str, list] = {
     "Фракционный поток": FRACTIONAL_METHODS,
 }
 
-# For gas phase: only DCA is applicable
-_GAS_FAMILIES: dict[str, list] = {
+# For gas phase or no-water datasets: only DCA is applicable
+_DCA_ONLY: dict[str, list] = {
     "Кривые падения добычи (DCA)": DCA_METHODS,
 }
 
@@ -47,6 +47,7 @@ class MethodPanel(QWidget):
         self.setMaximumWidth(320)
 
         self._phase: str = "oil"  # current phase: "oil" | "gas"
+        self._has_water: bool = True  # False when dataset has no water column
 
         layout = QVBoxLayout(self)
 
@@ -159,9 +160,15 @@ class MethodPanel(QWidget):
     def get_family_name(self) -> str:
         return self.cmb_family.currentText()
 
+    def _active_families(self) -> dict[str, list]:
+        """Return the family dict applicable for the current phase + water state."""
+        if self._phase == "gas" or not self._has_water:
+            return _DCA_ONLY
+        return _FAMILIES
+
     def get_method_class(self):
         """Return the selected ForecastMethod *class*."""
-        families = _GAS_FAMILIES if self._phase == "gas" else _FAMILIES
+        families = self._active_families()
         family = families.get(self.get_family_name(), [])
         idx = self.cmb_method.currentIndex()
         if 0 <= idx < len(family):
@@ -205,7 +212,7 @@ class MethodPanel(QWidget):
         if phase == self._phase:
             return
         self._phase = phase
-        families = _GAS_FAMILIES if phase == "gas" else _FAMILIES
+        families = self._active_families()
         current_family = self.cmb_family.currentText()
         self.cmb_family.blockSignals(True)
         self.cmb_family.clear()
@@ -231,6 +238,21 @@ class MethodPanel(QWidget):
         """Return the currently active phase."""
         return self._phase
 
+    def set_has_water(self, has_water: bool) -> None:
+        """Restrict to DCA-only when the dataset has no water column."""
+        if has_water == self._has_water:
+            return
+        self._has_water = has_water
+        families = self._active_families()
+        current_family = self.cmb_family.currentText()
+        self.cmb_family.blockSignals(True)
+        self.cmb_family.clear()
+        self.cmb_family.addItems(list(families.keys()))
+        idx = self.cmb_family.findText(current_family)
+        self.cmb_family.setCurrentIndex(max(0, idx))
+        self.cmb_family.blockSignals(False)
+        self._update_methods()
+
     def get_dca_mode(self) -> str:
         """Return 'production' or 'rate'."""
         return self.cmb_dca_mode.currentData() or "production"
@@ -247,7 +269,7 @@ class MethodPanel(QWidget):
 
     def _update_methods(self) -> None:
         self.cmb_method.clear()
-        families = _GAS_FAMILIES if self._phase == "gas" else _FAMILIES
+        families = self._active_families()
         family = families.get(self.get_family_name(), [])
         for cls in family:
             self.cmb_method.addItem(cls().get_name())

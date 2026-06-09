@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.patches import PathPatch
 from matplotlib.path import Path
-from matplotlib.ticker import MaxNLocator as _MaxNLocator
+from matplotlib.ticker import FuncFormatter as _FuncFormatter, MaxNLocator as _MaxNLocator
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -58,7 +58,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Displacement Forecaster")
-        self.resize(1280, 720)
+        self.resize(1280, 700)
 
         # ── State ────────────────────────────────────────────────────────────
         self.df: pd.DataFrame | None = None
@@ -89,6 +89,9 @@ class MainWindow(QMainWindow):
         self._forecast_line = None
         self._excl_patches: list = []
         self._include_patch = None          # blue polygon for current selection
+
+        # DCA date axis state (populated by _on_plot_data for the tick formatter)
+        self._dca_plot_dates: list = []
 
         # Trend editor state
         self._edit_trend_active: bool = False
@@ -395,6 +398,10 @@ class MainWindow(QMainWindow):
         )
         self.status.showMessage(action_msg, 3000)
 
+        # Restrict method families if no water data in the loaded dataset
+        has_water = COL_WATER in self.df.columns and (self.df[COL_WATER] > 0).any()
+        self.method_panel.set_has_water(has_water)
+
         # Ask user for project name after data load
         from PySide6.QtWidgets import QInputDialog
         name, ok = QInputDialog.getText(
@@ -591,9 +598,25 @@ class MainWindow(QMainWindow):
                             _dca_lbl = "Добыча газа (факт)" if _phase == "gas" else "Добыча нефти (факт)"
                             _dca_y_lbl = "Добыча газа, м\u00b3/мес" if _phase == "gas" else "Добыча нефти, т/мес"
                         ax.plot(range(len(ts)), ts.values, "o-", ms=3, label=_dca_lbl)
-                        ax.set_xlabel("Месяц")
+                        ax.set_xlabel("Дата")
                         ax.set_ylabel(_dca_y_lbl)
                         ax.set_yscale("log")
+
+                        # Show actual dates on X-axis
+                        self._dca_plot_dates = list(ts.index)
+                        def _fmt_dca(x_val, _pos, _dates=self._dca_plot_dates):
+                            idx = int(round(x_val))
+                            if 0 <= idx < len(_dates):
+                                return pd.Timestamp(_dates[idx]).strftime("%d.%m.%Y")
+                            if len(_dates) > 0 and idx >= len(_dates):
+                                last = pd.Timestamp(_dates[-1])
+                                try:
+                                    return (last + pd.DateOffset(months=idx - len(_dates) + 1)).strftime("%d.%m.%Y")
+                                except Exception:
+                                    return ""
+                            return ""
+                        ax.xaxis.set_major_formatter(_FuncFormatter(_fmt_dca))
+                        self.plot_widget.figure.autofmt_xdate(rotation=45, ha="right")
                 elif family == "Фракционный поток":
                     x = self._agg_cumulative(sub, COL_CUM_OIL)
                     y = self._agg_watercut(sub)
@@ -668,6 +691,7 @@ class MainWindow(QMainWindow):
         self.method_panel.set_edit_enabled(
             self._current_method is not None and self._trend_line is not None
         )
+        ax.grid(True, which="both", linestyle="--", color="grey", alpha=0.3)
         self.plot_widget.redraw()
 
     # ── Lasso selector callback

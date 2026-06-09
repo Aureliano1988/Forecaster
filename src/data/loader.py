@@ -13,12 +13,16 @@ from src.data.models import (
     COL_CUM_WATER,
     COL_DATE,
     COL_GAS,
+    COL_HOURS_WORK,
     COL_LIQUID,
+    COL_LIQUID_RATE,
     COL_OIL,
+    COL_OIL_RATE,
     COL_WATER,
     COL_WATER_CUT,
     COL_WATER_DUAL,
     COL_WATER_INJ,
+    COL_WATER_RATE,
     COL_WELL,
     COL_WORK_TYPE,
     HEADER_MAP,
@@ -66,6 +70,7 @@ def apply_manual_mapping(
     df = df[[c for c in df.columns if c in keep]].copy()
     df = _parse_dates(df)
     df = _coerce_numerics(df)
+    df = _convert_rates(df)      # daily rate → monthly production
     df = _apply_water_split(df)  # resolve WATER_DUAL / WATER_INJ sentinels
     df = _compute_derived(df)
     return df
@@ -85,6 +90,7 @@ def load_file(path: str | Path) -> pd.DataFrame:
     df = _rename_columns(df)
     df = _parse_dates(df)
     df = _coerce_numerics(df)
+    df = _convert_rates(df)      # daily rate → monthly production
     df = _apply_water_split(df)  # resolve WATER_DUAL / WATER_INJ sentinels
     df = _compute_derived(df)
     return df
@@ -109,6 +115,48 @@ def recompute_derived(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ── Private helpers ──────────────────────────────────────────────────────
+
+
+def _convert_rates(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert daily-rate columns to monthly production when production columns are absent.
+
+    Conversion factor: if hours_work is available, producing_days = hours_work / 24;
+    otherwise assume 30.4375 days/month (КЭ = 1).
+
+    Rate columns are consumed (dropped) after conversion.
+    """
+    import numpy as np
+
+    _RATE_TO_PROD = [
+        (COL_OIL_RATE,    COL_OIL),
+        (COL_WATER_RATE,  COL_WATER),
+        (COL_LIQUID_RATE, COL_LIQUID),
+    ]
+
+    converted_any = False
+    for rate_col, prod_col in _RATE_TO_PROD:
+        if rate_col not in df.columns:
+            continue
+        if prod_col in df.columns:
+            # Production column already exists — don't overwrite; just drop rate
+            df = df.drop(columns=[rate_col])
+            continue
+        # Compute monthly production = rate × producing_days
+        rate = df[rate_col].values.astype(float)
+        if COL_HOURS_WORK in df.columns:
+            days = df[COL_HOURS_WORK].values.astype(float) / 24.0
+            days = np.where(days > 0, days, 30.4375)
+        else:
+            days = np.full(len(rate), 30.4375)
+        df[prod_col] = rate * days
+        df = df.drop(columns=[rate_col])
+        converted_any = True
+
+    # If oil was converted from rate and work_type is absent, mark as oil-producing
+    if converted_any and COL_WORK_TYPE not in df.columns:
+        df[COL_WORK_TYPE] = WORK_TYPE_OIL
+
+    return df
 
 
 def _apply_water_split(df: pd.DataFrame) -> pd.DataFrame:
@@ -168,14 +216,23 @@ def _apply_water_split(df: pd.DataFrame) -> pd.DataFrame:
 
 def _read_csv(path: Path) -> pd.DataFrame:
     """Try combinations of encoding + delimiter until one works."""
+    best: pd.DataFrame | None = None
+    best_ncols = 0
     for enc in _ENCODINGS:
         for sep in _DELIMITERS:
             try:
                 df = pd.read_csv(path, sep=sep, encoding=enc, dtype=str)
-                if len(df.columns) >= 10:
-                    return df
+                nc = len(df.columns)
+                if nc >= 10:
+                    return df          # full MER-style file — use immediately
+                if nc > best_ncols:
+                    best = df
+                    best_ncols = nc
             except Exception:
                 continue
+    # Accept files with fewer columns (e.g. 3-column unpivoted data)
+    if best is not None and best_ncols >= 2:
+        return best
     raise ValueError(
         f"Could not read {path} with any encoding/delimiter combination."
     )
@@ -197,8 +254,16 @@ def _rename_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _parse_dates(df: pd.DataFrame) -> pd.DataFrame:
-    if COL_DATE in df.columns:
-        df[COL_DATE] = pd.to_datetime(df[COL_DATE], dayfirst=True, errors="coerce")
+    if COL_DATE not in df.columns:
+        return df
+    # Try dayfirst=True (DD.MM.YYYY / DD/MM/YYYY) first, then dayfirst=False
+    # (M/D/YYYY).  Pick whichever produces fewer NaT values.
+    raw = df[COL_DATE]
+    dt_day = pd.to_datetime(raw, dayfirst=True, errors="coerce")
+    dt_month = pd.to_datetime(raw, dayfirst=False, errors="coerce")
+    nat_day = dt_day.isna().sum()
+    nat_month = dt_month.isna().sum()
+    df[COL_DATE] = dt_day if nat_day <= nat_month else dt_month
     return df
 
 
@@ -217,9 +282,18 @@ def _coerce_numerics(df: pd.DataFrame) -> pd.DataFrame:
 
 def _compute_derived(df: pd.DataFrame) -> pd.DataFrame:
     """Add liquid, cumulative, and water-cut columns."""
-    oil = df.get(COL_OIL, 0.0)
-    water = df.get(COL_WATER, 0.0)
-    gas = df.get(COL_GAS, 0.0)
+    # Ensure water and gas columns exist (zero-filled) so downstream code
+    # never has to handle their absence.
+    if COL_WATER not in df.columns:
+        df[COL_WATER] = 0.0
+    if COL_GAS not in df.columns:
+        df[COL_GAS] = 0.0
+    if COL_OIL not in df.columns:
+        df[COL_OIL] = 0.0
+
+    oil = df[COL_OIL]
+    water = df[COL_WATER]
+    gas = df[COL_GAS]
 
     df[COL_LIQUID] = oil + water
 

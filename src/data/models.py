@@ -24,6 +24,11 @@ COL_GAS_CAP = "gas_cap_m3"
 COL_CONDENSATE = "condensate_t"
 COL_EXTRA = "extra_param"
 
+# Daily rate columns (assigned via import dialog; converted to monthly in loader)
+COL_OIL_RATE = "oil_rate_t_day"       # oil daily rate, t/day
+COL_WATER_RATE = "water_rate_t_day"   # water daily rate, t/day
+COL_LIQUID_RATE = "liquid_rate_t_day" # liquid daily rate, t/day
+
 # Derived / computed columns
 COL_LIQUID = "liquid_t"       # oil + water
 COL_CUM_OIL = "cum_oil_t"
@@ -58,6 +63,7 @@ NUMERIC_COLS = [
     COL_HOURS_WORK, COL_HOURS_ACCUM, COL_HOURS_DOWN,
     COL_OIL, COL_WATER, COL_WATER_DUAL, COL_WATER_INJ,
     COL_GAS, COL_GAS_CAP, COL_CONDENSATE, COL_EXTRA,
+    COL_OIL_RATE, COL_WATER_RATE, COL_LIQUID_RATE,
 ]
 
 # Work-type constants

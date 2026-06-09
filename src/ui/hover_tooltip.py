@@ -33,6 +33,7 @@ def install_hover_tooltip(canvas, figure) -> None:
             bbox=dict(boxstyle="round,pad=0.3", fc="wheat", alpha=0.9),
             fontsize=8,
             zorder=100,
+            annotation_clip=False,
         )
         _state["annot"].set_visible(False)
         _state["last_label"] = ""
@@ -88,6 +89,21 @@ def install_hover_tooltip(canvas, figure) -> None:
                 annot.set_visible(True)
                 annot.xy = (event.xdata, event.ydata)
                 _state["last_label"] = found_label
+                # Flip tooltip left/right so it stays inside the axes
+                try:
+                    renderer = canvas.get_renderer()
+                    bb = annot.get_window_extent(renderer)
+                    ax_bb = ax.get_window_extent(renderer)
+                    if bb.x1 > ax_bb.x1:          # overflows right
+                        annot.set_anncoords("offset points")
+                        annot.xyann = (-15 - bb.width, 15)
+                    elif bb.x0 < ax_bb.x0:         # overflows left
+                        annot.set_anncoords("offset points")
+                        annot.xyann = (15, 15)
+                    else:
+                        annot.xyann = (15, 15)
+                except Exception:
+                    pass
                 canvas.draw_idle()
         else:
             if annot.get_visible():

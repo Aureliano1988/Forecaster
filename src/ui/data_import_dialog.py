@@ -31,11 +31,14 @@ from src.data.models import (
     COL_HOURS_ACCUM,
     COL_HOURS_DOWN,
     COL_HOURS_WORK,
+    COL_LIQUID_RATE,
     COL_OIL,
+    COL_OIL_RATE,
     COL_STATUS,
     COL_WATER,
     COL_WATER_DUAL,
     COL_WATER_INJ,
+    COL_WATER_RATE,
     COL_WELL,
     COL_WORK_TYPE,
     HEADER_MAP,
@@ -56,9 +59,12 @@ _ASSIGNMENTS: list[tuple[str, str]] = [
     ("Время накопления, ч",        COL_HOURS_ACCUM),
     ("Время простоя, ч",           COL_HOURS_DOWN),
     ("Нефть, т",                               COL_OIL),
+    ("Дебит нефти, т/сут",                COL_OIL_RATE),
     ("Вода, т (только добыча)",           COL_WATER),
+    ("Дебит воды, т/сут",                COL_WATER_RATE),
     ("Вода (добыча/закачка) — автосплит", COL_WATER_DUAL),
     ("Закачка воды, м3 (только закачка)",  COL_WATER_INJ),
+    ("Дебит жидкости, т/сут",             COL_LIQUID_RATE),
     ("Газ, м3",                                COL_GAS),
     ("Газ из ГШ, м3",              COL_GAS_CAP),
     ("Конденсат, т",               COL_CONDENSATE),
@@ -72,7 +78,9 @@ _INTERNAL_TO_LABEL = {v: lbl for lbl, v in _ASSIGNMENTS if v}
 _WATER_GROUP = {COL_WATER, COL_WATER_DUAL, COL_WATER_INJ}
 
 # Required columns for a valid dataset
-_REQUIRED = {COL_WELL: "Скважина", COL_DATE: "Дата", COL_OIL: "Нефть, т"}
+# Oil can be assigned as either monthly production or daily rate
+_REQUIRED_BASE = {COL_WELL: "Скважина", COL_DATE: "Дата"}
+_OIL_ALTERNATIVES = {COL_OIL: "Нефть, т", COL_OIL_RATE: "Дебит нефти, т/сут"}
 
 # Background colour for the assignment row
 _ASSIGN_BG = QColor(230, 240, 255)   # light blue
@@ -168,7 +176,8 @@ class DataImportDialog(QDialog):
         legend_row = QHBoxLayout()
         req_lbl = QLabel(
             "Обязательные: "
-            "<b>Скважина</b>, <b>Дата</b>, <b>Нефть, т</b>"
+            "<b>Скважина</b>, <b>Дата</b>, "
+            "<b>Нефть</b> или <b>Дебит нефти</b>"
         )
         legend_row.addWidget(req_lbl)
         legend_row.addStretch()
@@ -267,8 +276,11 @@ class DataImportDialog(QDialog):
             )
             return
 
-        # Check required columns
-        missing = [lbl for col, lbl in _REQUIRED.items() if col not in assigned_vals]
+        # Check required columns (oil can be production OR rate)
+        missing = [lbl for col, lbl in _REQUIRED_BASE.items() if col not in assigned_vals]
+        has_oil = any(col in assigned_vals for col in _OIL_ALTERNATIVES)
+        if not has_oil:
+            missing.append("Нефть или Дебит нефти")
         if missing:
             reply = QMessageBox.question(
                 self, "Не все параметры назначены",

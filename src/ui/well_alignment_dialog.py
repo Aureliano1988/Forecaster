@@ -40,8 +40,8 @@ from PySide6.QtWidgets import (
 )
 
 from src.data.models import (
-    COL_DATE, COL_GAS, COL_HOURS_WORK, COL_OIL, COL_WELL, COL_WORK_TYPE,
-    WellAnalysisScenario, WORK_TYPE_OIL,
+    COL_DATE, COL_GAS, COL_HOURS_WORK, COL_OIL, COL_WATER, COL_WELL,
+    COL_WORK_TYPE, WellAnalysisScenario, WORK_TYPE_OIL,
 )
 
 # 20-colour palette
@@ -149,6 +149,20 @@ class WellAlignmentDialog(QDialog):
         phase_row.addStretch()
         left_lay.addLayout(phase_row)
 
+        # Data mode (production vs daily rate)
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Режим:"))
+        self._cmb_mode = QComboBox()
+        self._cmb_mode.addItem("Добыча", "production")
+        self._cmb_mode.addItem("Дебит", "rate")
+        self._cmb_mode.setToolTip(
+            "Добыча — месячная добыча (т/мес или м³/мес).\n"
+            "Дебит — суточный дебит = добыча / (часы работы / 24)."
+        )
+        mode_row.addWidget(self._cmb_mode)
+        mode_row.addStretch()
+        left_lay.addLayout(mode_row)
+
         # Well list group
         grp_wells = QGroupBox("Скважины")
         gw_lay = QVBoxLayout(grp_wells)
@@ -188,6 +202,13 @@ class WellAlignmentDialog(QDialog):
 
         self._chk_log = QCheckBox("Log шкала (Y)")
         left_lay.addWidget(self._chk_log)
+
+        self._chk_normalize = QCheckBox("Нормализовать")
+        self._chk_normalize.setToolTip(
+            "Разделить данные каждой скважины на первое\n"
+            "ненулевое значение (после фильтров)."
+        )
+        left_lay.addWidget(self._chk_normalize)
 
         # Eraser
         eraser_row = QHBoxLayout()
@@ -273,7 +294,9 @@ class WellAlignmentDialog(QDialog):
         # Connections
         self._lst.itemSelectionChanged.connect(self._on_selection_changed)
         self._chk_log.stateChanged.connect(self._draw)
+        self._chk_normalize.stateChanged.connect(self._draw)
         self._cmb_phase.currentIndexChanged.connect(self._on_phase_changed)
+        self._cmb_mode.currentIndexChanged.connect(self._on_mode_changed)
         self._btn_pct.clicked.connect(self._generate_percentiles)
         self._btn_prev.clicked.connect(self._on_prev_well)
         self._btn_next.clicked.connect(self._on_next_well)
@@ -412,6 +435,12 @@ class WellAlignmentDialog(QDialog):
 
     def _on_filter_changed(self) -> None:
         """Redraw when min-rate or min-days criteria change."""
+        self._clear_percentiles()
+        self._draw()
+
+    # ── Mode ────────────────────────────────────────────────────────────────
+
+    def _on_mode_changed(self, _idx: int) -> None:
         self._clear_percentiles()
         self._draw()
 
@@ -588,7 +617,12 @@ class WellAlignmentDialog(QDialog):
         self._pct_trends = {}
 
     def _generate_percentiles(self) -> None:
-        """Toggle P90/P50/P10.  Excluded and zero values are skipped."""
+        """Toggle P90/P50/P10.  Excluded and zero values are skipped.
+
+        The percentiles are computed on the same data the user sees on the
+        plot: daily rate when mode is 'rate', and normalised values when
+        the normalisation checkbox is active.
+        """
         if self._show_pct:
             self._clear_percentiles()
             self._draw()
@@ -600,6 +634,7 @@ class WellAlignmentDialog(QDialog):
                 f"Необходимо не менее 3 скважин.\nВыбрано: {len(selected)}.",
             )
             return
+        do_normalize = self._chk_normalize.isChecked()
         series: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         max_month = 0
         for well in selected:
@@ -609,6 +644,11 @@ class WellAlignmentDialog(QDialog):
             x, y, _ = result
             if not np.any(np.isfinite(y) & (y > 0)):
                 continue
+            # Apply normalization so percentiles match the plotted data
+            if do_normalize:
+                finite = y[np.isfinite(y) & (y > 0)]
+                if len(finite) > 0:
+                    y = y / finite[0]
             series[well] = (x, y)
             max_month = max(max_month, int(x[-1]))
         if not series:
@@ -689,23 +729,41 @@ class WellAlignmentDialog(QDialog):
           - the rate is below the min-rate filter, OR
           - the working days are below the min-days filter.
         iso_dates are ISO-formatted strings for each month row.
+
+        When mode is 'rate', y = production / (hours_work / 24) per well.
         """
         prod_col = COL_GAS if self._phase == "gas" else COL_OIL
+        is_rate_mode = self._cmb_mode.currentData() == "rate"
+
         sub = self._df[self._df[COL_WELL] == well].copy()
         if COL_WORK_TYPE in sub.columns:
             sub = sub[sub[COL_WORK_TYPE] == WORK_TYPE_OIL]
         if COL_DATE not in sub.columns or prod_col not in sub.columns:
             return None
-        agg = sub.groupby(COL_DATE)[prod_col].sum().sort_index()
-        if len(agg) == 0:
+
+        if is_rate_mode and COL_HOURS_WORK in sub.columns:
+            # Daily rate = production / producing_days
+            agg = sub.groupby(COL_DATE).agg(
+                {prod_col: "sum", COL_HOURS_WORK: "sum"}
+            ).sort_index()
+            days = agg[COL_HOURS_WORK].values / 24.0
+            raw_vals = np.divide(
+                agg[prod_col].values, days,
+                out=np.zeros(len(days), dtype=float), where=days > 0,
+            )
+            agg_series = pd.Series(raw_vals, index=agg.index)
+        else:
+            agg_series = sub.groupby(COL_DATE)[prod_col].sum().sort_index()
+
+        if len(agg_series) == 0:
             return None
-        positive_dates = agg[agg > 0].index
+        positive_dates = agg_series[agg_series > 0].index
         if len(positive_dates) == 0:
             return None
-        agg = agg[agg.index >= positive_dates[0]]
-        x = np.arange(1, len(agg) + 1, dtype=float)
-        y_raw = agg.values.astype(float)
-        iso_dates: list[str] = [str(d)[:10] for d in agg.index]
+        agg_series = agg_series[agg_series.index >= positive_dates[0]]
+        x = np.arange(1, len(agg_series) + 1, dtype=float)
+        y_raw = agg_series.values.astype(float)
+        iso_dates: list[str] = [str(d)[:10] for d in agg_series.index]
         y = y_raw.copy()
 
         # ── Criteria filters (applied before user exclusions) ────────────────
@@ -718,12 +776,12 @@ class WellAlignmentDialog(QDialog):
         min_days = self._spn_min_days.value()
         if min_days > 0 and COL_HOURS_WORK in sub.columns:
             hours_agg = sub.groupby(COL_DATE)[COL_HOURS_WORK].sum().sort_index()
-            hours_aligned = hours_agg.reindex(agg.index, fill_value=0.0)
+            hours_aligned = hours_agg.reindex(agg_series.index, fill_value=0.0)
             for i, hours in enumerate(hours_aligned.values):
                 if float(hours) / 24.0 < min_days:
                     y[i] = np.nan
 
-        # ── User exclusions ──────────────────────────────────────────────────
+        # ── User exclusions ──────────────────────────────────────────────
         for i, iso in enumerate(iso_dates):
             if (well, iso) in self._excluded:
                 y[i] = np.nan
@@ -750,48 +808,24 @@ class WellAlignmentDialog(QDialog):
             x, y, iso_dates = result
             color = _COLORS[ki % len(_COLORS)]
 
-            # Store ALL non-zero raw points for eraser hit-testing
-            raw_sub = self._df[self._df[COL_WELL] == well].copy()
-            if COL_WORK_TYPE in raw_sub.columns:
-                raw_sub = raw_sub[raw_sub[COL_WORK_TYPE] == WORK_TYPE_OIL]
-            if COL_DATE in raw_sub.columns and prod_col in raw_sub.columns:
-                agg_raw = raw_sub.groupby(COL_DATE)[prod_col].sum().sort_index()
-                pos_dates = agg_raw[agg_raw > 0].index
-                if len(pos_dates):
-                    agg_raw = agg_raw[agg_raw.index >= pos_dates[0]]
-                    self._well_points[well] = [
-                        (float(xi), float(agg_raw.iloc[i]), str(agg_raw.index[i])[:10])
-                        for i, xi in enumerate(
-                            range(1, len(agg_raw) + 1), start=0
-                        )
-                        if np.isfinite(agg_raw.iloc[i]) and agg_raw.iloc[i] > 0
-                    ]
+            # Normalize to first non-NaN value if requested
+            if self._chk_normalize.isChecked():
+                finite = y[np.isfinite(y) & (y > 0)]
+                if len(finite) > 0:
+                    y = y / finite[0]
+
+            # Store non-NaN plotted points for eraser hit-testing
+            # (coordinates must match what is visible on the axes)
+            self._well_points[well] = [
+                (float(x[i]), float(y[i]), iso_dates[i])
+                for i in range(len(y))
+                if np.isfinite(y[i]) and y[i] > 0
+            ]
 
             # Plot line (NaN creates visible gaps at excluded months)
             ax.plot(x, y, color=color, linewidth=well_lw,
                     label=well, alpha=well_alpha)
 
-            # Overlay excluded points as red x markers
-            excl_x, excl_y = [], []
-            for xi_idx, iso in enumerate(iso_dates):
-                if (well, iso) in self._excluded:
-                    # retrieve original raw value
-                    try:
-                        raw_sub2 = self._df[self._df[COL_WELL] == well]
-                        if COL_WORK_TYPE in raw_sub2.columns:
-                            raw_sub2 = raw_sub2[raw_sub2[COL_WORK_TYPE] == WORK_TYPE_OIL]
-                        agg2 = raw_sub2.groupby(COL_DATE)[prod_col].sum()
-                        match = next(
-                            (d for d in agg2.index if str(d)[:10] == iso), None
-                        )
-                        if match is not None:
-                            excl_x.append(float(xi_idx + 1))
-                            excl_y.append(float(agg2[match]))
-                    except Exception:
-                        pass
-            if excl_x:
-                ax.scatter(excl_x, excl_y, marker="x", s=60,
-                           color="red", linewidths=1.5, zorder=6)
 
         # Percentile trendlines
         if self._show_pct and self._pct_months is not None:
@@ -808,7 +842,13 @@ class WellAlignmentDialog(QDialog):
                             label=_PCT_LABELS[pct], zorder=5)
 
         ax.set_xlabel("Месяц от начала добычи")
-        y_lbl = "Газ, м\u00b3/мес" if self._phase == "gas" else "Нефть, т/мес"
+        _mode = self._cmb_mode.currentData()
+        if self._chk_normalize.isChecked():
+            y_lbl = "Относительное значение"
+        elif _mode == "rate":
+            y_lbl = "Дебит газа, м\u00b3/сут" if self._phase == "gas" else "Дебит нефти, т/сут"
+        else:
+            y_lbl = "Газ, м\u00b3/мес" if self._phase == "gas" else "Нефть, т/мес"
         ax.set_ylabel(y_lbl)
         title = "Приведённая добыча по скважинам"
         lbl = self._scenario_label()
