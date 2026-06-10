@@ -142,8 +142,8 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(_act("Закрыть проект",          self._on_close_project,   "Ctrl+W"))
         file_menu.addSeparator()
-        file_menu.addAction(_act("Экспорт графика…",        self._on_export_plot,     "Ctrl+E"))
-        file_menu.addAction(_act("Экспорт прогноза…",       self._on_export_forecast, "Ctrl+Shift+E"))
+        file_menu.addAction(_act("Экспорт графика (PNG/SVG)…",  self._on_export_plot,     "Ctrl+E"))
+        file_menu.addAction(_act("Экспорт прогноза (CSV)…",   self._on_export_forecast, "Ctrl+Shift+E"))
         file_menu.addSeparator()
         file_menu.addAction(_act("Выход",                     self.close))
 

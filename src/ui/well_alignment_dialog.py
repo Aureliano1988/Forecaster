@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSplitter,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -51,8 +52,9 @@ try:
 except Exception:
     _COLORS = [f"C{i}" for i in range(10)]
 
-_PCT_COLORS = {10: "#1f77b4", 50: "#222222", 90: "#d62728"}
-_PCT_LABELS = {10: "P10", 50: "P50", 90: "P90"}
+# Petroleum convention: P10 = optimistic (high, 90th pctl), P90 = conservative (low, 10th pctl)
+_PCT_COLORS = {10: "#d62728", 50: "#222222", 90: "#1f77b4"}
+_PCT_LABELS = {10: "P90", 50: "P50", 90: "P10"}
 
 
 class WellAlignmentDialog(QDialog):
@@ -225,8 +227,28 @@ class WellAlignmentDialog(QDialog):
         self._lbl_excl.setStyleSheet("font-size: 9px; color: #a00;")
         left_lay.addWidget(self._lbl_excl)
 
-        self._btn_pct = QPushButton("Генерировать P90/P50/P10")
+        # DCA model choice for percentile trendlines
+        pct_model_row = QHBoxLayout()
+        pct_model_row.addWidget(QLabel("Модель:"))
+        self._cmb_pct_model = QComboBox()
+        self._cmb_pct_model.addItem("Экспоненциальная", "exp")
+        self._cmb_pct_model.addItem("Гиперболическая", "hyp")
+        self._cmb_pct_model.addItem("Гармоническая", "har")
+        pct_model_row.addWidget(self._cmb_pct_model)
+        pct_model_row.addStretch()
+        left_lay.addLayout(pct_model_row)
+
+        self._btn_pct = QPushButton("Генерировать P10/P50/P90")
         left_lay.addWidget(self._btn_pct)
+
+        # Results box
+        grp_res = QGroupBox("Результаты")
+        res_lay = QVBoxLayout(grp_res)
+        self._txt_result = QTextEdit()
+        self._txt_result.setReadOnly(True)
+        self._txt_result.setMaximumHeight(140)
+        res_lay.addWidget(self._txt_result)
+        left_lay.addWidget(grp_res)
 
         # Data filters
         grp_flt = QGroupBox("Фильтр данных")
@@ -677,37 +699,104 @@ class WellAlignmentDialog(QDialog):
         self._pct_months = np.array(months_list)
         self._pct_data = {k: np.array(v) for k, v in p_vals.items()}
         self._pct_trends = {
-            k: self._fit_exp(self._pct_months, self._pct_data[k])
+            k: self._fit_trend(self._pct_months, self._pct_data[k])
             for k in p_vals
         }
         self._show_pct = True
+        self._update_results_text()
         self._draw()
 
-    @staticmethod
-    def _fit_exp(months: np.ndarray, values: np.ndarray) -> tuple | None:
+    def _fit_trend(self, months: np.ndarray, values: np.ndarray) -> tuple | None:
+        """Fit a DCA trend to (months, values) using the selected model.
+
+        Returns (qi, Di) for exponential/harmonic, (qi, Di, b) for hyperbolic,
+        or None on failure.  Also returns R².
+        """
         mask = values > 0
         if np.sum(mask) < 3:
             return None
         t = months[mask]
         q = values[mask]
+        model = self._cmb_pct_model.currentData()
+        from scipy.optimize import curve_fit
+
         try:
-            from scipy.optimize import curve_fit
-            popt, _ = curve_fit(
-                lambda t, qi, Di: qi * np.exp(-Di * t),
-                t, q, p0=[float(q[0]), 0.02],
-                bounds=([0.0, 0.0], [np.inf, 5.0]), maxfev=5000,
-            )
-            return float(popt[0]), float(np.clip(popt[1], 0.0, 5.0))
+            if model == "hyp":
+                def _hyp(t, qi, Di, b):
+                    base = 1.0 + b * Di * t
+                    return qi / np.power(np.where(base > 0, base, 1e-12), 1.0 / b)
+                popt, _ = curve_fit(
+                    _hyp, t, q, p0=[float(q[0]), 0.02, 0.5],
+                    bounds=([0, 0, 0.01], [np.inf, 10, 0.99]), maxfev=10000,
+                )
+                return float(popt[0]), float(popt[1]), float(popt[2])
+            elif model == "har":
+                def _har(t, qi, Di):
+                    return qi / (1.0 + Di * t)
+                popt, _ = curve_fit(
+                    _har, t, q, p0=[float(q[0]), 0.01],
+                    bounds=([0, 0], [np.inf, 10]), maxfev=5000,
+                )
+                return float(popt[0]), float(popt[1])
+            else:  # exp
+                popt, _ = curve_fit(
+                    lambda t, qi, Di: qi * np.exp(-Di * t),
+                    t, q, p0=[float(q[0]), 0.02],
+                    bounds=([0.0, 0.0], [np.inf, 5.0]), maxfev=5000,
+                )
+                return float(popt[0]), float(np.clip(popt[1], 0.0, 5.0))
         except Exception:
             pass
-        try:
-            log_q = np.log(np.clip(q, 1e-12, None))
-            coeffs = np.polyfit(t, log_q, 1)
-            return float(np.exp(coeffs[1])), float(np.clip(-coeffs[0], 0.0, 5.0))
-        except Exception:
-            return None
+        # Fallback: log-linear for exponential
+        if model == "exp":
+            try:
+                log_q = np.log(np.clip(q, 1e-12, None))
+                coeffs = np.polyfit(t, log_q, 1)
+                return float(np.exp(coeffs[1])), float(np.clip(-coeffs[0], 0.0, 5.0))
+            except Exception:
+                pass
+        return None
 
-    # ── Data helpers ────────────────────────────────────────────────────────
+    def _update_results_text(self) -> None:
+        """Show R² and trend coefficients for P10/P50/P90 in the results box."""
+        if not self._show_pct or self._pct_months is None or self._pct_data is None:
+            self._txt_result.clear()
+            return
+        model = self._cmb_pct_model.currentData()
+        model_names = {"exp": "Экспоненциальная", "hyp": "Гиперболическая", "har": "Гармоническая"}
+        lines = [f"Модель: {model_names.get(model, model)}"]
+        for pct_key in (90, 50, 10):  # display order: P10(high) P50 P90(low)
+            label = _PCT_LABELS[pct_key]
+            trend = self._pct_trends.get(pct_key)
+            data = self._pct_data.get(pct_key)
+            if trend is None or data is None:
+                lines.append(f"{label}: не удалось подобрать")
+                continue
+            # Compute R²
+            t = self._pct_months
+            q = data
+            mask = q > 0
+            t_m, q_m = t[mask], q[mask]
+            if model == "hyp" and len(trend) == 3:
+                qi, Di, b = trend
+                base = 1.0 + b * Di * t_m
+                pred = qi / np.power(np.where(base > 0, base, 1e-12), 1.0 / b)
+                params_str = f"qi={qi:.4g}, Di={Di:.4g}, b={b:.3f}"
+            elif model == "har":
+                qi, Di = trend[0], trend[1]
+                pred = qi / (1.0 + Di * t_m)
+                params_str = f"qi={qi:.4g}, Di={Di:.4g}"
+            else:
+                qi, Di = trend[0], trend[1]
+                pred = qi * np.exp(-Di * t_m)
+                params_str = f"qi={qi:.4g}, Di={Di:.4g}"
+            ss_res = float(np.sum((q_m - pred) ** 2))
+            ss_tot = float(np.sum((q_m - np.mean(q_m)) ** 2))
+            r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 1.0
+            lines.append(f"{label}: R²={r2:.4f}  {params_str}")
+        self._txt_result.setPlainText("\n".join(lines))
+
+    # ── Data helpers ────────────────────────────────────────────────────
 
     def _producing_wells(self) -> list[str]:
         prod_col = COL_GAS if self._phase == "gas" else COL_OIL
@@ -844,15 +933,26 @@ class WellAlignmentDialog(QDialog):
         if self._show_pct and self._pct_months is not None:
             m = self._pct_months
             t_max = float(m[-1]) * 1.5
+            model = self._cmb_pct_model.currentData()
             for pct in (10, 50, 90):
                 col = _PCT_COLORS[pct]
                 trend = self._pct_trends.get(pct)
-                if trend is not None:
-                    qi, Di = trend
-                    x_ext = np.linspace(float(m[0]), t_max, 400)
-                    ax.plot(x_ext, qi * np.exp(-Di * x_ext),
-                            color=col, linewidth=2.0, linestyle="--",
-                            label=_PCT_LABELS[pct], zorder=5)
+                if trend is None:
+                    continue
+                x_ext = np.linspace(float(m[0]), t_max, 400)
+                if model == "hyp" and len(trend) == 3:
+                    qi, Di, b = trend
+                    base = 1.0 + b * Di * x_ext
+                    y_ext = qi / np.power(np.where(base > 0, base, 1e-12), 1.0 / b)
+                elif model == "har":
+                    qi, Di = trend[0], trend[1]
+                    y_ext = qi / (1.0 + Di * x_ext)
+                else:
+                    qi, Di = trend[0], trend[1]
+                    y_ext = qi * np.exp(-Di * x_ext)
+                ax.plot(x_ext, y_ext,
+                        color=col, linewidth=2.0, linestyle="--",
+                        label=_PCT_LABELS[pct], zorder=5)
 
         ax.set_xlabel("Месяц от начала добычи")
         _mode = self._cmb_mode.currentData()
@@ -938,11 +1038,20 @@ class WellAlignmentDialog(QDialog):
                     if m in pct_lookup else ["", "", ""]
                 )
             if has_trend:
+                model = self._cmb_pct_model.currentData()
                 for pct in (10, 50, 90):
                     tr = self._pct_trends.get(pct)
                     if tr is not None:
-                        qi, Di = tr
-                        row.append(f"{qi * np.exp(-Di * m):.4g}")
+                        qi, Di = tr[0], tr[1]
+                        if model == "hyp" and len(tr) == 3:
+                            b = tr[2]
+                            base = 1.0 + b * Di * m
+                            val = qi / (base ** (1.0 / b)) if base > 0 else 0.0
+                        elif model == "har":
+                            val = qi / (1.0 + Di * m)
+                        else:
+                            val = qi * np.exp(-Di * m)
+                        row.append(f"{val:.4g}")
             rows.append("\t".join(row))
         QApplication.instance().clipboard().setText("\n".join(rows))
 

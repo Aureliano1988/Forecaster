@@ -84,7 +84,8 @@ except Exception:
     _COLORS = [f"C{i}" for i in range(10)]
 
 _LSTYLES   = ["-", "--", "-.", ":", (0, (3, 1, 1, 1))]
-_PCT_COLORS = {10: "#1f77b4", 50: "#222222", 90: "#d62728"}
+# Petroleum convention: P10 = optimistic (high, 90th pctl), P90 = conservative (low, 10th pctl)
+_PCT_COLORS = {10: "#d62728", 50: "#222222", 90: "#1f77b4"}
 
 
 def _arr(result, attr: str) -> np.ndarray:
