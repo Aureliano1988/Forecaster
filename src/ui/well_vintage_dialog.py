@@ -142,11 +142,13 @@ class WellVintageDialog(QDialog):
         btns = QHBoxLayout()
         btn_clip     = QPushButton("Копировать график")
         btn_save_img = QPushButton("Сохранить картинку\u2026")
-        btn_data     = QPushButton("Скопировать данные")
+        btn_data     = QPushButton("Скопировать добычу")
+        btn_wells    = QPushButton("Скопировать список")
         btn_clip.clicked.connect(self._to_clipboard)
         btn_save_img.clicked.connect(self._save_image)
         btn_data.clicked.connect(self._copy_data)
-        for b in (btn_clip, btn_save_img, btn_data):
+        btn_wells.clicked.connect(self._copy_well_list)
+        for b in (btn_clip, btn_save_img, btn_data, btn_wells):
             btns.addWidget(b)
         btns.addStretch()
         right_lay.addLayout(btns)
@@ -383,6 +385,18 @@ class WellVintageDialog(QDialog):
             row.append(f"{total:.4g}")
             rows.append("\t".join(row))
 
+        QApplication.instance().clipboard().setText("\n".join(rows))
+
+    def _copy_well_list(self) -> None:
+        """Copy well-name / vintage-year table to clipboard."""
+        from PySide6.QtWidgets import QApplication
+
+        selected = [item.text() for item in self._lst.selectedItems()]
+        rows: list[str] = ["\u0421\u043a\u0432\u0430\u0436\u0438\u043d\u0430\t\u0413\u043e\u0434 \u0432\u0432\u043e\u0434\u0430"]
+        for well in sorted(selected):
+            yr = self._vintage_cache.get(well)
+            if yr is not None:
+                rows.append(f"{well}\t{yr}")
         QApplication.instance().clipboard().setText("\n".join(rows))
 
     def _to_clipboard(self) -> None:

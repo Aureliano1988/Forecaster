@@ -9,8 +9,10 @@ from __future__ import annotations
 import io
 
 import numpy as np
+import pandas as pd
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
+from matplotlib.ticker import FuncFormatter as _FuncFormatter
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -39,6 +41,7 @@ _FAMILY_SHORT: dict[str, str] = {
 
 # (display_name,  series_attr,  axis_label)
 _X_VARS = [
+    ("Дата",                    "date",    "Дата"),
     ("Месяц прогноза",         "month",   "Месяц"),
     ("Нак. нефть, т",          "Qo",      "Нак. нефть, т"),
     ("ВНФ",                    "WOR",     "ВНФ"),
@@ -171,6 +174,24 @@ class ForecastPlotsDialog(QDialog):
         # May also contain RF and HCPVI if STOIIP/HCPV are set in main window
         self._hist: dict | None = hist_data
 
+        # Last historical date for date-axis formatting
+        self._last_hist_date: pd.Timestamp | None = None
+        self._n_hist: int = 0
+        mw = parent
+        if mw is not None and hasattr(mw, "df") and mw.df is not None:
+            from src.data.models import COL_DATE, COL_OIL, COL_WELL, COL_WORK_TYPE, WORK_TYPE_OIL
+            sub = mw.df
+            if COL_WORK_TYPE in sub.columns:
+                sub = sub[sub[COL_WORK_TYPE] == WORK_TYPE_OIL]
+            if hasattr(mw, "_selected_wells") and mw._selected_wells:
+                sub = sub[sub[COL_WELL].isin(mw._selected_wells)]
+            if COL_DATE in sub.columns and len(sub) > 0:
+                dates = sub.groupby(COL_DATE)[COL_OIL].sum().sort_index()
+                dates = dates[dates > 0]
+                if len(dates) > 0:
+                    self._last_hist_date = pd.Timestamp(dates.index[-1])
+                    self._n_hist = len(dates)
+
         title = "Графики прогнозов"
         if project_name:
             title += f" — {project_name}"
@@ -210,7 +231,7 @@ class ForecastPlotsDialog(QDialog):
         grp_m = QGroupBox("Методы")
         gm_lay = QVBoxLayout(grp_m)
         self._lst = QListWidget()
-        self._lst.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+        self._lst.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         for key, result in self._data.items():
             family, mname = key.split("|", 1)
             short = _FAMILY_SHORT.get(family, family[:3])
@@ -219,6 +240,15 @@ class ForecastPlotsDialog(QDialog):
             self._lst.addItem(item)
         self._lst.selectAll()
         gm_lay.addWidget(self._lst)
+        _m_btns = QHBoxLayout()
+        _btn_m_all = QPushButton("Все")
+        _btn_m_none = QPushButton("Снять")
+        _btn_m_all.clicked.connect(self._lst.selectAll)
+        _btn_m_none.clicked.connect(self._lst.clearSelection)
+        _m_btns.addWidget(_btn_m_all)
+        _m_btns.addWidget(_btn_m_none)
+        _m_btns.addStretch()
+        gm_lay.addLayout(_m_btns)
         ctrl_lay.addWidget(grp_m)
         self._grp_methods = grp_m   # kept for show/hide
 
@@ -243,13 +273,22 @@ class ForecastPlotsDialog(QDialog):
         sc_lay.addWidget(self._cmb_sc_method)
         sc_lay.addWidget(QLabel("Сценарии:"))
         self._lst_sc = QListWidget()
-        self._lst_sc.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+        self._lst_sc.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         for _i, _sc in enumerate(self._scenarios):
             _item = QListWidgetItem(_sc.name)
             _item.setData(Qt.ItemDataRole.UserRole, _i)
             self._lst_sc.addItem(_item)
         self._lst_sc.selectAll()
         sc_lay.addWidget(self._lst_sc)
+        _sc_btns = QHBoxLayout()
+        _btn_sc_all = QPushButton("Все")
+        _btn_sc_none = QPushButton("Снять")
+        _btn_sc_all.clicked.connect(self._lst_sc.selectAll)
+        _btn_sc_none.clicked.connect(self._lst_sc.clearSelection)
+        _sc_btns.addWidget(_btn_sc_all)
+        _sc_btns.addWidget(_btn_sc_none)
+        _sc_btns.addStretch()
+        sc_lay.addLayout(_sc_btns)
         ctrl_lay.addWidget(sc_panel)
         sc_panel.setVisible(False)
         self._sc_panel = sc_panel
@@ -371,6 +410,9 @@ class ForecastPlotsDialog(QDialog):
         eff_hcpv         = hcpv         if hcpv         is not None else self._hcpv
         eff_qi_hist_last = qi_hist_last if qi_hist_last is not None else self._qi_hist_last
         eff_qi_const     = qi_const     if qi_const     is not None else self._qi_const
+        if x_attr == "date":
+            # Use month indices; the tick formatter converts to dates
+            return np.arange(1, s.duration + 1, dtype=float)
         if x_attr == "month":
             return np.arange(1, s.duration + 1, dtype=float)
         elif x_attr == "Qo":
@@ -794,7 +836,7 @@ class ForecastPlotsDialog(QDialog):
                     continue
                 color_i = _COLORS[ki % len(_COLORS)]
                 sc_i = self._scenarios[sc_idx]
-                if x_attr == "month":
+                if x_attr in ("month", "date"):
                     xh = np.arange(-(n_hist_i - 1), 1, dtype=float)
                 elif x_attr in sc_hist_i:
                     xh = np.asarray(sc_hist_i[x_attr], dtype=float)
@@ -821,15 +863,15 @@ class ForecastPlotsDialog(QDialog):
                     if ylbl not in bucket:
                         bucket.append(ylbl)
 
-        self._finish_axes(ax1, ax2, x_label, y1_labels, y2_labels, n_items=len(selected_sc_idx))
+        self._finish_axes(ax1, ax2, x_attr, x_label, y1_labels, y2_labels, n_items=len(selected_sc_idx))
 
-    # ── Shared axes finaliser ─────────────────────────────────────
+    # ── Shared axes finaliser ───────────────────────────────────
 
     def _finish_axes(
-        self, ax1, ax2, x_label: str,
+        self, ax1, ax2, x_attr: str, x_label: str,
         y1_labels: list, y2_labels: list, n_items: int,
     ) -> None:
-        """Apply labels, log scales, legend and grid, then redraw."""
+        """Apply labels, log scales, date formatter, legend and grid, then redraw."""
         ax1.set_xlabel(x_label)
         if y1_labels:
             ax1.set_ylabel(" / ".join(y1_labels))
@@ -850,6 +892,18 @@ class ForecastPlotsDialog(QDialog):
                     ax.set_yscale("log")
             except Exception:
                 pass
+
+        # Date axis formatting (shared by both drawing modes)
+        if x_attr == "date" and self._last_hist_date is not None:
+            last_d = self._last_hist_date
+            def _fmt_date(val, _pos, _last=last_d):
+                m = int(round(val))
+                try:
+                    return (_last + pd.DateOffset(months=m)).strftime("%d.%m.%Y")
+                except Exception:
+                    return ""
+            ax1.xaxis.set_major_formatter(_FuncFormatter(_fmt_date))
+            self._fig.autofmt_xdate(rotation=45, ha="right")
 
         from src.ui.legend_helper import fit_legend
         fit_legend(ax1, extra_ax=ax2, loc="best")
@@ -920,7 +974,7 @@ class ForecastPlotsDialog(QDialog):
 
         # ── Historical data (one shared set, dark colour) ───────────────
         if hist is not None and self._chk_hist.isChecked() and n_hist > 0:
-            if x_attr == "month":
+            if x_attr in ("month", "date"):
                 xh = np.arange(-(n_hist - 1), 1, dtype=float)  # … -1, 0
             elif x_attr in hist:
                 xh = np.asarray(hist[x_attr], dtype=float)
@@ -971,7 +1025,7 @@ class ForecastPlotsDialog(QDialog):
                     if ylbl not in bucket:
                         bucket.append(ylbl)
 
-        self._finish_axes(ax1, ax2, x_label, y1_labels, y2_labels, n_items=len(selected_keys))
+        self._finish_axes(ax1, ax2, x_attr, x_label, y1_labels, y2_labels, n_items=len(selected_keys))
 
     # ── Export ────────────────────────────────────────────────────────────
 

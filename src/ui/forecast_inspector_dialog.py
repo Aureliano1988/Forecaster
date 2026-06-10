@@ -61,6 +61,7 @@ class ForecastInspectorDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Инспектор прогнозов")
         self.resize(900, 520)
+        self.setMinimumWidth(340)
         self.setModal(False)
 
         self._scenarios: list[ForecastScenario] = list(scenarios)
@@ -85,6 +86,27 @@ class ForecastInspectorDialog(QDialog):
     def _refresh_list(self) -> None:
         self._refresh_tree()
 
+    def sync_from_main(self, scenarios: list[ForecastScenario], active_idx: int) -> None:
+        """Live-update the dialog when the main window state changes."""
+        if not self.isVisible():
+            return
+        self._scenarios = list(scenarios)
+        self._active_idx = active_idx
+        self._refresh_tree()
+
+    def _toggle_detail(self) -> None:
+        """Show/hide the right detail panel and resize the dialog."""
+        visible = self._right_panel.isVisible()
+        self._right_panel.setVisible(not visible)
+        self._btn_toggle_detail.setText(
+            "▶ Показать детали" if visible else "◀ Скрыть детали"
+        )
+        if visible:
+            # Shrink the dialog to the tree width
+            self.resize(380, self.height())
+        else:
+            self.resize(900, self.height())
+
     # ── UI construction ─────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
@@ -94,9 +116,9 @@ class ForecastInspectorDialog(QDialog):
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(lbl)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # ── Left: tree ──────────────────────────────────────────────────────
+        # ── Left: tree ──────────────────────────────────────────────
         left = QWidget()
         left_lay = QVBoxLayout(left)
         left_lay.setContentsMargins(0, 0, 0, 0)
@@ -108,12 +130,11 @@ class ForecastInspectorDialog(QDialog):
         self._tree.itemSelectionChanged.connect(self._on_selection_changed)
         self._tree.itemDoubleClicked.connect(self._on_activate)
         left_lay.addWidget(self._tree)
-        splitter.addWidget(left)
+        self._splitter.addWidget(left)
 
-        # ── Right: detail ───────────────────────────────────────────────────
-        right = QWidget()
-        right.setMinimumWidth(350)
-        right_lay = QVBoxLayout(right)
+        # ── Right: detail (collapsible) ──────────────────────────────
+        self._right_panel = QWidget()
+        right_lay = QVBoxLayout(self._right_panel)
         right_lay.setContentsMargins(0, 0, 0, 0)
         right_lay.setSpacing(4)
 
@@ -130,11 +151,20 @@ class ForecastInspectorDialog(QDialog):
         self._detail = QTextEdit()
         self._detail.setReadOnly(True)
         right_lay.addWidget(self._detail)
-        splitter.addWidget(right)
+        self._splitter.addWidget(self._right_panel)
 
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 2)
-        root.addWidget(splitter, stretch=1)
+        self._splitter.setStretchFactor(0, 1)
+        self._splitter.setStretchFactor(1, 2)
+
+        # Toggle button for detail panel
+        toggle_row = QHBoxLayout()
+        self._btn_toggle_detail = QPushButton("◀ Скрыть детали")
+        self._btn_toggle_detail.setFixedHeight(22)
+        self._btn_toggle_detail.clicked.connect(self._toggle_detail)
+        toggle_row.addStretch()
+        toggle_row.addWidget(self._btn_toggle_detail)
+        root.addLayout(toggle_row)
+        root.addWidget(self._splitter, stretch=1)
 
         # ── Button rows ─────────────────────────────────────────────────────
         row1 = QHBoxLayout()

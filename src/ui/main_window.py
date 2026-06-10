@@ -154,9 +154,9 @@ class MainWindow(QMainWindow):
         forecast_menu.addAction(_act("Ввести данные…",       self._on_enter_reservoir_data))
         forecast_menu.addSeparator()
         forecast_menu.addAction(_act("Сводка прогнозов…",  self._on_forecast_summary))
-        forecast_menu.addAction(_act("Графики прогнозов…", self._on_forecast_plots))
+        forecast_menu.addAction(_act("Графики прогнозов…", self._on_forecast_plots, "Ctrl+F"))
         forecast_menu.addSeparator()
-        forecast_menu.addAction(_act("Экспорт данных…",    self._on_export_data))
+        forecast_menu.addAction(_act("Экспорт данных…",    self._on_export_data,    "Ctrl+D"))
 
         # Скважины
         wells_menu = menu.addMenu("Скважины")
@@ -445,6 +445,7 @@ class MainWindow(QMainWindow):
         self._saved_results.clear()   # underlying data changed
         self._fit_result_text = ""
         self._on_plot_data()
+        self._sync_inspector()
 
     # ── Helpers ────────────────────────────────────────────────────────────
 
@@ -483,6 +484,14 @@ class MainWindow(QMainWindow):
                 setattr(m, attr_key, float(val))
         return m
 
+    def _sync_inspector(self) -> None:
+        """Push current scenario state to the open inspector dialog (if any)."""
+        if self._inspector_dlg is not None and self._inspector_dlg.isVisible():
+            self._commit_active_scenario()
+            self._inspector_dlg.sync_from_main(
+                self._scenarios, self._active_scenario_idx
+            )
+
     def _update_window_title(self) -> None:
         """Reflect the current project name + active scenario in the title bar."""
         title = "Displacement Forecaster"
@@ -498,6 +507,8 @@ class MainWindow(QMainWindow):
         """Write working buffers into the active scenario slot."""
         if not self._scenarios:
             return
+        if self._active_scenario_idx >= len(self._scenarios):
+            self._active_scenario_idx = len(self._scenarios) - 1
         sc = self._scenarios[self._active_scenario_idx]
         sc.wells    = list(self._selected_wells)
         sc.results  = dict(self._saved_results)
@@ -1051,6 +1062,7 @@ class MainWindow(QMainWindow):
             monthly=monthly,
             qo_hist_last=Qo_last,
         )
+        self._sync_inspector()
 
     # ── Export ────────────────────────────────────────────────────────────────
 
@@ -2378,8 +2390,11 @@ class MainWindow(QMainWindow):
         new_scenarios = self._inspector_dlg.result_scenarios()
         if new_scenarios:
             self._scenarios = new_scenarios
-        # Clamp idx in case a deletion shifted the list
+        # Clamp indices BEFORE committing to avoid IndexError
         idx = max(0, min(idx, len(self._scenarios) - 1))
+        self._active_scenario_idx = min(
+            self._active_scenario_idx, len(self._scenarios) - 1
+        )
         self._commit_active_scenario()
         self._load_scenario_into_buffers(idx)
         # Update the active indicator in the dialog
