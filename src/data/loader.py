@@ -12,12 +12,16 @@ from src.data.models import (
     COL_CUM_OIL,
     COL_CUM_WATER,
     COL_DATE,
+    COL_DOWNTIME_REASON,
+    COL_EXPLOIT_METHOD,
+    COL_FORMATION,
     COL_GAS,
     COL_HOURS_WORK,
     COL_LIQUID,
     COL_LIQUID_RATE,
     COL_OIL,
     COL_OIL_RATE,
+    COL_STATUS,
     COL_WATER,
     COL_WATER_CUT,
     COL_WATER_DUAL,
@@ -70,6 +74,7 @@ def apply_manual_mapping(
     df = df[[c for c in df.columns if c in keep]].copy()
     df = _parse_dates(df)
     df = _coerce_numerics(df)
+    df = _coerce_string_cols(df)
     df = _convert_rates(df)      # daily rate → monthly production
     df = _apply_water_split(df)  # resolve WATER_DUAL / WATER_INJ sentinels
     df = _compute_derived(df)
@@ -90,6 +95,7 @@ def load_file(path: str | Path) -> pd.DataFrame:
     df = _rename_columns(df)
     df = _parse_dates(df)
     df = _coerce_numerics(df)
+    df = _coerce_string_cols(df)
     df = _convert_rates(df)      # daily rate → monthly production
     df = _apply_water_split(df)  # resolve WATER_DUAL / WATER_INJ sentinels
     df = _compute_derived(df)
@@ -280,6 +286,21 @@ def _coerce_numerics(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# String columns that must stay as str (not float when values are numeric)
+_STRING_COLS = [
+    COL_WELL, COL_WORK_TYPE, COL_STATUS, COL_FORMATION,
+    COL_EXPLOIT_METHOD, COL_DOWNTIME_REASON,
+]
+
+
+def _coerce_string_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure text columns are str dtype, stripping whitespace and NaN."""
+    for col in _STRING_COLS:
+        if col in df.columns:
+            df[col] = df[col].fillna("").astype(str).str.strip()
+    return df
+
+
 def _compute_derived(df: pd.DataFrame) -> pd.DataFrame:
     """Add liquid, cumulative, and water-cut columns."""
     # Ensure water and gas columns exist (zero-filled) so downstream code
@@ -290,6 +311,7 @@ def _compute_derived(df: pd.DataFrame) -> pd.DataFrame:
         df[COL_GAS] = 0.0
     if COL_OIL not in df.columns:
         df[COL_OIL] = 0.0
+
 
     oil = df[COL_OIL]
     water = df[COL_WATER]

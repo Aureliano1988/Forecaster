@@ -394,7 +394,7 @@ class MainWindow(QMainWindow):
             self._source_files = new_paths
             action_msg = "Данные загружены"
 
-        wells = sorted(self.df[COL_WELL].unique().tolist())
+        wells = sorted(str(w) for w in self.df[COL_WELL].unique() if pd.notna(w))
         self.data_panel.populate_wells(wells)
         n = len(self.df)
         self.data_panel.lbl_info.setText(
@@ -536,7 +536,7 @@ class MainWindow(QMainWindow):
 
         well_set  = set(sc.wells)
         all_wells = (
-            sorted(self.df[COL_WELL].unique().tolist())
+            sorted(str(w) for w in self.df[COL_WELL].unique() if pd.notna(w))
             if self.df is not None else sorted(well_set)
         )
         self.data_panel.well_list.blockSignals(True)
