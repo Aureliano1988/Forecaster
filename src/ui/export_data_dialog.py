@@ -25,62 +25,74 @@ from src.data.models import ForecastScenario
 # ── Available parameters (label, extractor function) ──────────────────────────
 # Each extractor takes (sc: ForecastScenario, method_key: str, result) → str
 
-def _method_name(sc, key, r):
+def _method_name(sc, key, r, ctx=None):
     return r.method_name
 
-def _family(sc, key, r):
+def _family(sc, key, r, ctx=None):
     return key.split("|", 1)[0]
 
-def _wells(sc, key, r):
+def _wells(sc, key, r, ctx=None):
     return ", ".join(sc.wells) if sc.wells else "—"
 
-def _n_wells(sc, key, r):
+def _n_wells(sc, key, r, ctx=None):
     return str(len(sc.wells))
 
-def _duration(sc, key, r):
+def _duration(sc, key, r, ctx=None):
     m = r.monthly
     return str(m.duration) if m and m.duration > 0 else "—"
 
-def _stop(sc, key, r):
+def _stop(sc, key, r, ctx=None):
     m = r.monthly
     return (m.stop_reason or "горизонт") if m and m.duration > 0 else "—"
 
-def _qo_hist(sc, key, r):
+def _qo_hist(sc, key, r, ctx=None):
     return f"{r.qo_hist_last:,.0f}" if r.qo_hist_last > 0 else "—"
 
-def _remain(sc, key, r):
+def _remain(sc, key, r, ctx=None):
     m = r.monthly
     return f"{m.remain_reserves:,.0f}" if m and m.duration > 0 else "—"
 
-def _total_oil(sc, key, r):
+def _total_oil(sc, key, r, ctx=None):
     m = r.monthly
     if m and m.duration > 0:
         return f"{r.qo_hist_last + m.remain_reserves:,.0f}" if r.qo_hist_last > 0 else "—"
     return "—"
 
-def _total_water(sc, key, r):
+def _total_water(sc, key, r, ctx=None):
     m = r.monthly
     if m and m.duration > 0 and m.Qw:
         return f"{m.Qw[-1]:,.0f}"
     return "—"
 
-def _total_liquid(sc, key, r):
+def _total_liquid(sc, key, r, ctx=None):
     m = r.monthly
     if m and m.duration > 0 and m.Ql:
         return f"{m.Ql[-1]:,.0f}"
     return "—"
 
-def _wor_last(sc, key, r):
+def _total_water_inj(sc, key, r, ctx=None):
+    """Total forecasted water injection (constant-rate extrapolation)."""
+    if not ctx:
+        return "—"
+    info = ctx.get(sc.name)
+    if not info or info["qi_const"] <= 0:
+        return "—"
+    m = r.monthly
+    if m and m.duration > 0:
+        return f"{info['qi_const'] * m.duration:,.0f}"
+    return "—"
+
+def _wor_last(sc, key, r, ctx=None):
     m = r.monthly
     return f"{m.wor_last:.2f}" if m and m.duration > 0 else "—"
 
-def _qo_last_month(sc, key, r):
+def _qo_last_month(sc, key, r, ctx=None):
     m = r.monthly
     if m and m.duration > 0 and m.qo:
         return f"{m.qo[-1]:,.1f}"
     return "—"
 
-def _rf(sc, key, r):
+def _rf(sc, key, r, ctx=None):
     m = r.monthly
     stoiip = sc.stoiip
     if stoiip > 0 and m and m.duration > 0 and r.qo_hist_last > 0:
@@ -88,11 +100,20 @@ def _rf(sc, key, r):
         return f"{total / stoiip:.4f}"
     return "—"
 
-def _hcpvi(sc, key, r):
-    # Cannot compute without injection data; placeholder
+def _hcpvi(sc, key, r, ctx=None):
+    """HCPVI at the end of the forecast horizon."""
+    if not ctx:
+        return "—"
+    info = ctx.get(sc.name)
+    if not info or info["eff_hcpv"] <= 0:
+        return "—"
+    m = r.monthly
+    if m and m.duration > 0:
+        total_inj = info["qi_hist_last"] + info["qi_const"] * m.duration
+        return f"{total_inj / info['eff_hcpv']:.4f}"
     return "—"
 
-def _group(sc, key, r):
+def _group(sc, key, r, ctx=None):
     return getattr(sc, "group", "") or "—"
 
 
@@ -109,7 +130,9 @@ _PARAMS: list[tuple[str, object]] = [
     ("НТИК, т",             _total_oil),
     ("Нак. вода прогн., т", _total_water),
     ("Нак. жидк. прогн., т",_total_liquid),
+    ("Нак. закачка прогн., т", _total_water_inj),
     ("КИН (RF)",            _rf),
+    ("HCPVI (посл.)",       _hcpvi),
     ("ВНФ (посл.)",         _wor_last),
     ("Посл. qo, т/мес",    _qo_last_month),
 ]
@@ -128,6 +151,7 @@ class ExportDataDialog(QDialog):
         self,
         scenarios: list[ForecastScenario],
         project_name: str = "",
+        inj_context: dict | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -138,6 +162,7 @@ class ExportDataDialog(QDialog):
         self.resize(1100, 600)
 
         self._scenarios = scenarios
+        self._inj_context: dict = inj_context or {}
         self._build_ui()
         self._refresh_preview()
 
@@ -292,7 +317,7 @@ class ExportDataDialog(QDialog):
                 row = [sc.name]
                 for lbl, extractor in params:
                     try:
-                        row.append(extractor(sc, key, r))
+                        row.append(extractor(sc, key, r, self._inj_context))
                     except Exception:
                         row.append("—")
                 rows.append(row)

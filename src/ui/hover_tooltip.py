@@ -68,6 +68,19 @@ def install_hover_tooltip(canvas, figure) -> None:
         return cache
 
     def _on_move(event):
+        # Suppress tooltip while a mouse button is pressed (e.g. lasso drawing)
+        if event.button is not None:
+            a = _state["annot"]
+            if a is not None:
+                try:
+                    if a.get_visible():
+                        a.set_visible(False)
+                        _state["last_label"] = ""
+                        canvas.draw_idle()
+                except Exception:
+                    _state["annot"] = None
+            return
+
         if event.inaxes is None:
             a = _state["annot"]
             if a is not None:

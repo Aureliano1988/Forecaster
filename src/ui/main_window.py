@@ -2120,6 +2120,7 @@ class MainWindow(QMainWindow):
             hcpv=eff_hcpv,
             qi_hist_last=qi_hist_last,
             qi_const=qi_const,
+            n_avg=self.method_panel.get_n_avg(),
             scenarios=self._scenarios,
             scenarios_hist=scenarios_hist,
             parent=self,
@@ -2149,10 +2150,32 @@ class MainWindow(QMainWindow):
         if not has_any:
             self.status.showMessage("Нет рассчитанных прогнозов для экспорта", 3000)
             return
+
+        # Pre-compute injection context per scenario for HCPVI / injection columns
+        inj_context: dict = {}
+        if self.df is not None:
+            n_avg = self.method_panel.get_n_avg()
+            for sc in self._scenarios:
+                qi_hist_last = 0.0
+                qi_const = 0.0
+                eff_hcpv = sc.hcpv if sc.hcpv > 0 else self._hcpv
+                sc_hist = self._compute_scenario_hist(sc)
+                if sc_hist and "Qi_inj" in sc_hist:
+                    qi_cum = sc_hist["Qi_inj"]
+                    qi_hist_last = float(qi_cum[-1]) if len(qi_cum) else 0.0
+                    qi_arr = sc_hist["qi_inj"]
+                    qi_const, _ = self._avg_last(qi_arr, n_avg)
+                inj_context[sc.name] = {
+                    "qi_hist_last": qi_hist_last,
+                    "qi_const": qi_const,
+                    "eff_hcpv": eff_hcpv,
+                }
+
         from src.ui.export_data_dialog import ExportDataDialog
         dlg = ExportDataDialog(
             self._scenarios,
             project_name=self._project_name,
+            inj_context=inj_context,
             parent=self,
         )
         dlg.exec()

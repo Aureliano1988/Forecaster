@@ -145,6 +145,7 @@ class ForecastPlotsDialog(QDialog):
         hcpv: float = 0.0,
         qi_hist_last: float = 0.0,
         qi_const: float = 0.0,
+        n_avg: int = 3,
         scenarios=None,           # list[ForecastScenario] | None
         scenarios_hist=None,      # list[dict | None] | None  — per-scenario hist_data
         parent=None,
@@ -160,6 +161,7 @@ class ForecastPlotsDialog(QDialog):
         self._hcpv = hcpv
         self._qi_hist_last = qi_hist_last
         self._qi_const = qi_const
+        self._n_avg = n_avg
 
         # All scenarios (for scenario-comparison mode)
         self._scenarios = list(scenarios) if scenarios else []
@@ -393,6 +395,19 @@ class ForecastPlotsDialog(QDialog):
 
         self._draw()
 
+    # ── Averaging helper (matches MainWindow._avg_last) ───────────────
+
+    @staticmethod
+    def _avg_last(arr: np.ndarray, n: int) -> float:
+        """Mean of positive values in the last *n* elements of *arr*."""
+        if len(arr) == 0:
+            return 0.0
+        tail = arr[-n:]
+        pos = tail[tail > 0]
+        if len(pos) == 0:
+            return float(tail[-1])
+        return float(pos.mean())
+
     # ── RF / HCPVI helpers ────────────────────────────────────────────
 
     def _x_for(
@@ -541,6 +556,15 @@ class ForecastPlotsDialog(QDialog):
 
     # ── Data clipboard ──────────────────────────────────────────────
 
+    def _month_to_date(self, m: int) -> str:
+        """Convert month offset to dd.mm.yyyy string (month 0 = last hist date)."""
+        if self._last_hist_date is None:
+            return str(m)
+        try:
+            return (self._last_hist_date + pd.DateOffset(months=m)).strftime("%d.%m.%Y")
+        except Exception:
+            return str(m)
+
     def _copy_data(self) -> None:
         """Copy forecast data as TSV.  Handles both comparison modes."""
         from PySide6.QtWidgets import QApplication
@@ -595,12 +619,22 @@ class ForecastPlotsDialog(QDialog):
                     for y_attr, _ in enabled_yvars
                 }
 
+        # History settings
+        include_hist = self._chk_hist.isChecked() and hist is not None
+        n_hist = len(hist["qo"]) if hist and "qo" in hist else 0
+        use_dates = x_attr == "date" and self._last_hist_date is not None
+        hist_yvars = [
+            (a, l) for a, l in enabled_yvars if a in hist
+        ] if include_hist and n_hist > 0 else []
+
         # Header
-        hdr = ["Месяц"]
+        hdr = ["Дата" if use_dates else "Месяц"]
+        for y_attr, ylbl in hist_yvars:
+            hdr.append(f"Факт — {ylbl}")
         for y_attr, ylbl in enabled_yvars:
             for key in selected_keys:
                 hdr.append(f"{method_names[key]} — {ylbl}")
-        if x_attr != "month":
+        if x_attr not in ("month", "date"):
             for key in selected_keys:
                 hdr.append(f"{method_names[key]} — {x_label}")
         if pct_method_y:
@@ -609,21 +643,39 @@ class ForecastPlotsDialog(QDialog):
                     hdr.append(f"P{pct} — {ylbl}")
 
         # Rows
+        first_month = -(n_hist - 1) if hist_yvars else 1
         rows = ["\t".join(hdr)]
-        for m in range(1, max_dur + 1):
-            row = [str(m)]
+        for m in range(first_month, max_dur + 1):
+            row = [self._month_to_date(m) if use_dates else str(m)]
+            # History columns
+            for y_attr, _ in hist_yvars:
+                hi = m + n_hist - 1
+                if 0 <= hi < n_hist:
+                    yh = np.asarray(hist[y_attr], dtype=float)
+                    row.append(f"{yh[hi]:.4g}" if hi < len(yh) else "")
+                else:
+                    row.append("")
+            # Forecast columns
             for y_attr, _ in enabled_yvars:
                 for key in selected_keys:
-                    ya = method_y[key][y_attr]
-                    row.append(f"{ya[m-1]:.4g}" if m <= len(ya) else "")
-            if x_attr != "month":
+                    if m >= 1:
+                        ya = method_y[key][y_attr]
+                        row.append(f"{ya[m-1]:.4g}" if m <= len(ya) else "")
+                    else:
+                        row.append("")
+            # X-axis columns (non-standard, forecast only)
+            if x_attr not in ("month", "date"):
                 for key in selected_keys:
-                    xa = method_x[key]
-                    row.append(f"{xa[m-1]:.4g}" if m <= len(xa) else "")
+                    if m >= 1:
+                        xa = method_x[key]
+                        row.append(f"{xa[m-1]:.4g}" if m <= len(xa) else "")
+                    else:
+                        row.append("")
+            # P10/P50/P90 (forecast only)
             if pct_method_y:
                 for y_attr, _ in enabled_yvars:
                     for pct in (10, 50, 90):
-                        if pct in pct_method_y and y_attr in pct_method_y[pct]:
+                        if m >= 1 and pct in pct_method_y and y_attr in pct_method_y[pct]:
                             ya_p = pct_method_y[pct][y_attr]
                             row.append(f"{ya_p[m-1]:.4g}" if m <= len(ya_p) else "")
                         else:
@@ -659,6 +711,7 @@ class ForecastPlotsDialog(QDialog):
 
         # Build per-scenario arrays
         sc_names: list[str] = []
+        sc_orig_idx: list[int] = []   # original scenario indices (for hist lookup)
         sc_x: list[np.ndarray] = []
         sc_y: list[dict[str, np.ndarray]] = []
         max_dur = 0
@@ -679,10 +732,11 @@ class ForecastPlotsDialog(QDialog):
                 if "Qi_inj" in _sh and len(_sh["Qi_inj"]) > 0:
                     _sc_qi_hist_last = float(_sh["Qi_inj"][-1])
                 if "qi_inj" in _sh and len(_sh["qi_inj"]) > 0:
-                    _qi = np.asarray(_sh["qi_inj"], dtype=float)
-                    _pos = _qi[_qi > 0]
-                    _sc_qi_const = float(_pos[-min(3, len(_pos)):].mean()) if len(_pos) > 0 else 0.0
+                    _sc_qi_const = self._avg_last(
+                        np.asarray(_sh["qi_inj"], dtype=float), self._n_avg
+                    )
             sc_names.append(sc.name)
+            sc_orig_idx.append(sc_idx)
             sc_x.append(self._x_for(
                 s, x_attr, qo_last, ql_last_global,
                 stoiip=_sc_stoiip,
@@ -705,25 +759,66 @@ class ForecastPlotsDialog(QDialog):
         if not sc_names:
             return
 
-        hdr = ["Месяц"]
+        # History settings
+        include_hist = self._chk_hist.isChecked() and bool(self._scenarios_hist)
+        use_dates = x_attr == "date" and self._last_hist_date is not None
+        # Per-scenario hist dicts and max history length
+        sc_hists: list[dict | None] = []
+        max_n_hist = 0
+        if include_hist:
+            for oi in sc_orig_idx:
+                sh = self._scenarios_hist[oi] if oi < len(self._scenarios_hist) else None
+                sc_hists.append(sh)
+                if sh:
+                    max_n_hist = max(max_n_hist, len(sh.get("qo", [])))
+        else:
+            sc_hists = [None] * len(sc_names)
+
+        # Header
+        hdr = ["Дата" if use_dates else "Месяц"]
+        if max_n_hist > 0:
+            for y_attr, ylbl in enabled_yvars:
+                for name in sc_names:
+                    hdr.append(f"{name} (факт) — {ylbl}")
         for y_attr, ylbl in enabled_yvars:
             for name in sc_names:
                 hdr.append(f"{name} — {ylbl}")
-        if x_attr != "month":
+        if x_attr not in ("month", "date"):
             for name in sc_names:
                 hdr.append(f"{name} — {x_label}")
 
+        first_month = -(max_n_hist - 1) if max_n_hist > 0 else 1
         rows = ["\t".join(hdr)]
-        for m in range(1, max_dur + 1):
-            row = [str(m)]
+        for m in range(first_month, max_dur + 1):
+            row = [self._month_to_date(m) if use_dates else str(m)]
+            # History columns per scenario
+            if max_n_hist > 0:
+                for y_attr, _ in enabled_yvars:
+                    for i in range(len(sc_names)):
+                        sh = sc_hists[i]
+                        if sh and y_attr in sh:
+                            nh = len(sh.get("qo", []))
+                            hi = m + nh - 1
+                            yh = np.asarray(sh[y_attr], dtype=float)
+                            row.append(f"{yh[hi]:.4g}" if 0 <= hi < len(yh) else "")
+                        else:
+                            row.append("")
+            # Forecast columns
             for y_attr, _ in enabled_yvars:
                 for i in range(len(sc_names)):
-                    ya = sc_y[i][y_attr]
-                    row.append(f"{ya[m-1]:.4g}" if m <= len(ya) else "")
-            if x_attr != "month":
+                    if m >= 1:
+                        ya = sc_y[i][y_attr]
+                        row.append(f"{ya[m-1]:.4g}" if m <= len(ya) else "")
+                    else:
+                        row.append("")
+            # X-axis columns (non-standard, forecast only)
+            if x_attr not in ("month", "date"):
                 for i in range(len(sc_names)):
-                    xa = sc_x[i]
-                    row.append(f"{xa[m-1]:.4g}" if m <= len(xa) else "")
+                    if m >= 1:
+                        xa = sc_x[i]
+                        row.append(f"{xa[m-1]:.4g}" if m <= len(xa) else "")
+                    else:
+                        row.append("")
             rows.append("\t".join(row))
 
         QApplication.instance().clipboard().setText("\n".join(rows))
@@ -792,9 +887,9 @@ class ForecastPlotsDialog(QDialog):
                 if "Qi_inj" in _sh and len(_sh["Qi_inj"]) > 0:
                     sc_qi_hist_last = float(_sh["Qi_inj"][-1])
                 if "qi_inj" in _sh and len(_sh["qi_inj"]) > 0:
-                    _qi = np.asarray(_sh["qi_inj"], dtype=float)
-                    _pos = _qi[_qi > 0]
-                    sc_qi_const = float(_pos[-min(3, len(_pos)):].mean()) if len(_pos) > 0 else 0.0
+                    sc_qi_const = self._avg_last(
+                        np.asarray(_sh["qi_inj"], dtype=float), self._n_avg
+                    )
             x = self._x_for(s, x_attr, qo_last, ql_last,
                             stoiip=sc_stoiip,
                             hcpv=sc_hcpv,
