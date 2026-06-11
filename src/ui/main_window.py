@@ -2002,64 +2002,25 @@ class MainWindow(QMainWindow):
     def _on_enter_reservoir_data(self) -> None:
         """Open the reservoir parameters dialog to enter STOIIP and HCPV."""
         from src.ui.reservoir_data_dialog import ReservoirDataDialog
-        from PySide6.QtWidgets import QPushButton
 
-        # Pre-fill with the active scenario's effective values
+        self._commit_active_scenario()
+
         dlg = ReservoirDataDialog(
-            stoiip=self._sc_stoiip(),
-            hcpv=self._sc_hcpv(),
+            scenarios=self._scenarios,
+            default_stoiip=self._stoiip,
+            default_hcpv=self._hcpv,
             parent=self,
         )
         if dlg.exec() != ReservoirDataDialog.DialogCode.Accepted:
             return
 
-        new_stoiip = dlg.get_stoiip()
-        new_hcpv   = dlg.get_hcpv()
+        # Apply project defaults
+        self._stoiip = dlg.get_default_stoiip()
+        self._hcpv   = dlg.get_default_hcpv()
+        # Apply per-scenario values
+        dlg.apply_to_scenarios()
 
-        # Ask scope when there are scenarios to distinguish between
-        apply_to_all = True
-        if self._scenarios:
-            msg_box = QMessageBox(self)
-            msg_box.setWindowTitle("Применить данные пласта")
-            sc_name = self._scenarios[self._active_scenario_idx].name
-            msg_box.setText(
-                f"Применить STOIIP / HCPV:"
-            )
-            btn_sc  = msg_box.addButton(
-                f"Только для сценария «{sc_name}»",
-                QMessageBox.ButtonRole.AcceptRole,
-            )
-            btn_all = msg_box.addButton(
-                "Всему проекту (всем сценариям)",
-                QMessageBox.ButtonRole.ActionRole,
-            )
-            msg_box.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
-            msg_box.exec()
-            clicked = msg_box.clickedButton()
-            if clicked is None or clicked not in (btn_sc, btn_all):
-                return
-            apply_to_all = (clicked is btn_all)
-
-        if apply_to_all:
-            self._stoiip = new_stoiip
-            self._hcpv   = new_hcpv
-            for sc in self._scenarios:
-                sc.stoiip = new_stoiip
-                sc.hcpv   = new_hcpv
-            scope_msg = "всему проекту"
-        else:
-            sc = self._scenarios[self._active_scenario_idx]
-            sc.stoiip = new_stoiip
-            sc.hcpv   = new_hcpv
-            scope_msg = f"сценарию «{sc.name}»"
-
-        parts = []
-        if new_stoiip > 0:
-            parts.append(f"STOIIP={new_stoiip:,.0f} т")
-        if new_hcpv > 0:
-            parts.append(f"HCPV={new_hcpv:,.0f} м\u00b3")
-        vals = ", ".join(parts) if parts else "нулевые значения"
-        self.status.showMessage(f"Данные пласта сохранены — {vals} — применено {scope_msg}", 6000)
+        self.status.showMessage("Данные пласта сохранены", 5000)
 
     def _on_forecast_plots(self) -> None:
         """Open the interactive forecast plots window."""

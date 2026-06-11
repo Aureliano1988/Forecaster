@@ -53,8 +53,8 @@ except Exception:
     _COLORS = [f"C{i}" for i in range(10)]
 
 # Petroleum convention: P10 = optimistic (high, 90th pctl), P90 = conservative (low, 10th pctl)
-_PCT_COLORS = {10: "#d62728", 50: "#222222", 90: "#1f77b4"}
-_PCT_LABELS = {10: "P90", 50: "P50", 90: "P10"}
+_PCT_COLORS = {10: "#d62728", 50: "#222222", 90: "#1f77b4", -1: "#2ca02c"}
+_PCT_LABELS = {10: "P90", 50: "P50", 90: "P10", -1: "Среднее"}
 
 
 class WellAlignmentDialog(QDialog):
@@ -234,11 +234,27 @@ class WellAlignmentDialog(QDialog):
         self._cmb_pct_model.addItem("Экспоненциальная", "exp")
         self._cmb_pct_model.addItem("Гиперболическая", "hyp")
         self._cmb_pct_model.addItem("Гармоническая", "har")
+        self._cmb_pct_model.addItem("Лучший R\u00b2", "best")
         pct_model_row.addWidget(self._cmb_pct_model)
         pct_model_row.addStretch()
         left_lay.addLayout(pct_model_row)
 
-        self._btn_pct = QPushButton("Генерировать P10/P50/P90")
+        # Profile checkboxes
+        prof_row = QHBoxLayout()
+        self._chk_p10 = QCheckBox("P10")
+        self._chk_p50 = QCheckBox("P50")
+        self._chk_avg = QCheckBox("Средн.")
+        self._chk_p90 = QCheckBox("P90")
+        self._chk_p10.setChecked(True)
+        self._chk_p50.setChecked(True)
+        self._chk_avg.setChecked(True)
+        self._chk_p90.setChecked(True)
+        for cb in (self._chk_p10, self._chk_p50, self._chk_avg, self._chk_p90):
+            prof_row.addWidget(cb)
+        prof_row.addStretch()
+        left_lay.addLayout(prof_row)
+
+        self._btn_pct = QPushButton("Аппроксимировать")
         left_lay.addWidget(self._btn_pct)
 
         # Results box
@@ -432,7 +448,49 @@ class WellAlignmentDialog(QDialog):
         self._update_scenario_label()
 
     def _on_scenario_activated(self, idx: int) -> None:
+        # Ask to save the current scenario before switching
+        if self._scenarios and self._active_idx < len(self._scenarios):
+            selected = [item.text() for item in self._lst.selectedItems()]
+            has_work = bool(selected) or bool(self._excluded) or self._show_pct
+            if has_work:
+                sc_name = self._scenario_label() or "Текущий"
+                reply = QMessageBox.question(
+                    self, "Смена сценария",
+                    f"Сохранить сценарий \u00ab{sc_name}\u00bb?",
+                    QMessageBox.StandardButton.Save |
+                    QMessageBox.StandardButton.Discard,
+                    QMessageBox.StandardButton.Save,
+                )
+                if reply == QMessageBox.StandardButton.Save:
+                    self._apply_state_to_scenario(
+                        self._scenarios[self._active_idx]
+                    )
         self._load_scenario(idx)
+
+    def _scenario_summary(self) -> str:
+        """Build a short text describing the current scenario setup."""
+        selected = [item.text() for item in self._lst.selectedItems()]
+        phase_lbl = "Нефть" if self._phase == "oil" else "Газ"
+        mode_lbl = "Добыча" if self._cmb_mode.currentData() == "production" else "Дебит"
+        lines = [
+            f"Скважины: {len(selected)}",
+            f"Флюид: {phase_lbl}",
+            f"Режим: {mode_lbl}",
+            f"Исключено точек: {len(self._excluded)}",
+            f"Нормализация: {'\u0414\u0430' if self._chk_normalize.isChecked() else '\u041d\u0435\u0442'}",
+            f"P10/P50/P90: {'\u0414\u0430' if self._show_pct else '\u041d\u0435\u0442'}",
+        ]
+        if self._show_pct:
+            model_names = {"exp": "Эксп.", "hyp": "Гиперб.", "har": "Гарм."}
+            lines.append(f"  Модель: {model_names.get(self._cmb_pct_model.currentData(), '?')}")
+        flt_parts = []
+        if self._spn_min_rate.value() > 0:
+            flt_parts.append(f"мин. дебит {self._spn_min_rate.value():.1f}")
+        if self._spn_min_days.value() > 0:
+            flt_parts.append(f"мин. дней {self._spn_min_days.value():.1f}")
+        if flt_parts:
+            lines.append(f"Фильтры: {', '.join(flt_parts)}")
+        return "\n".join(lines)
 
     def _on_save_scenario(self) -> None:
         if not self._scenarios:
@@ -446,12 +504,65 @@ class WellAlignmentDialog(QDialog):
             self._active_idx = len(self._scenarios) - 1
         else:
             sc = self._scenarios[self._active_idx]
+
+        # Show confirmation with scenario summary
+        summary = self._scenario_summary()
+        reply = QMessageBox.question(
+            self, f"Сохранить сценарий \u00ab{sc.name}\u00bb?",
+            f"Параметры сценария:\n\n{summary}",
+            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save,
+        )
+        if reply != QMessageBox.StandardButton.Save:
+            # If it was a new scenario, remove it
+            if len(self._scenarios) > 0 and self._scenarios[-1] is sc and not sc.wells:
+                self._scenarios.pop()
+                self._active_idx = max(0, len(self._scenarios) - 1)
+            return
+
         self._apply_state_to_scenario(sc)
         self._update_scenario_label()
         QMessageBox.information(
             self, "Сохранено",
-            f"Сценарий «{sc.name}» сохранён."
+            f"Сценарий \u00ab{sc.name}\u00bb сохранён."
         )
+
+    def closeEvent(self, event) -> None:
+        """Ask to save the current scenario on dialog close."""
+        selected = [item.text() for item in self._lst.selectedItems()]
+        has_work = bool(selected) or bool(self._excluded) or self._show_pct
+        if not has_work:
+            event.accept()
+            return
+
+        sc_name = self._scenario_label() or "Текущий сценарий"
+        summary = self._scenario_summary()
+        reply = QMessageBox.question(
+            self, "Закрытие",
+            f"Сохранить сценарий \u00ab{sc_name}\u00bb перед закрытием?\n\n{summary}",
+            QMessageBox.StandardButton.Save |
+            QMessageBox.StandardButton.Discard |
+            QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save,
+        )
+        if reply == QMessageBox.StandardButton.Cancel:
+            event.ignore()
+            return
+        if reply == QMessageBox.StandardButton.Save:
+            if not self._scenarios:
+                name, ok = QInputDialog.getText(
+                    self, "Сохранить сценарий", "Название:", text="Анализ 1"
+                )
+                if not ok or not name.strip():
+                    event.ignore()
+                    return
+                sc = WellAnalysisScenario(name=name.strip())
+                self._scenarios.append(sc)
+                self._active_idx = len(self._scenarios) - 1
+            else:
+                sc = self._scenarios[self._active_idx]
+            self._apply_state_to_scenario(sc)
+        event.accept()
 
     # ── Filter criteria ─────────────────────────────────────────────────────
 
@@ -637,6 +748,8 @@ class WellAlignmentDialog(QDialog):
         self._pct_months = None
         self._pct_data = None
         self._pct_trends = {}
+        self._btn_pct.setText("Аппроксимировать")
+        self._txt_result.clear()
 
     def _generate_percentiles(self) -> None:
         """Toggle P90/P50/P10.  Excluded and zero values are skipped.
@@ -677,8 +790,22 @@ class WellAlignmentDialog(QDialog):
             QMessageBox.warning(self, "Нет данных",
                                 "Нет скважин с ненулевой добычей после исключений.")
             return
+        # Determine which profiles to generate
+        gen_p10 = self._chk_p10.isChecked()  # P10 = 90th percentile (high)
+        gen_p50 = self._chk_p50.isChecked()
+        gen_avg = self._chk_avg.isChecked()
+        gen_p90 = self._chk_p90.isChecked()  # P90 = 10th percentile (low)
+        if not (gen_p10 or gen_p50 or gen_avg or gen_p90):
+            QMessageBox.warning(self, "Нет профилей",
+                                "Выберите хотя бы один профиль для генерации.")
+            return
+
         months_list: list[float] = []
-        p_vals: dict[int, list[float]] = {10: [], 50: [], 90: []}
+        p_vals: dict[int, list[float]] = {}
+        if gen_p90: p_vals[10] = []
+        if gen_p50: p_vals[50] = []
+        if gen_p10: p_vals[90] = []
+        if gen_avg: p_vals[-1] = []
         for m in range(1, max_month + 1):
             vals = []
             for x, y in series.values():
@@ -689,9 +816,10 @@ class WellAlignmentDialog(QDialog):
             if len(vals) >= 3:
                 arr = np.array(vals)
                 months_list.append(float(m))
-                p_vals[10].append(float(np.percentile(arr, 10)))
-                p_vals[50].append(float(np.percentile(arr, 50)))
-                p_vals[90].append(float(np.percentile(arr, 90)))
+                if gen_p90: p_vals[10].append(float(np.percentile(arr, 10)))
+                if gen_p50: p_vals[50].append(float(np.percentile(arr, 50)))
+                if gen_p10: p_vals[90].append(float(np.percentile(arr, 90)))
+                if gen_avg: p_vals[-1].append(float(arr.mean()))
         if not months_list:
             QMessageBox.warning(self, "Нет данных",
                                 "Нет месяцев с \u2265 3 скважинами с ненулевой добычей.")
@@ -703,23 +831,18 @@ class WellAlignmentDialog(QDialog):
             for k in p_vals
         }
         self._show_pct = True
+        self._btn_pct.setText("Отменить")
         self._update_results_text()
         self._draw()
 
-    def _fit_trend(self, months: np.ndarray, values: np.ndarray) -> tuple | None:
-        """Fit a DCA trend to (months, values) using the selected model.
-
-        Returns (qi, Di) for exponential/harmonic, (qi, Di, b) for hyperbolic,
-        or None on failure.  Also returns R².
-        """
+    def _fit_single_model(self, months: np.ndarray, values: np.ndarray, model: str) -> tuple | None:
+        """Fit one DCA model. Returns params tuple or None."""
         mask = values > 0
         if np.sum(mask) < 3:
             return None
         t = months[mask]
         q = values[mask]
-        model = self._cmb_pct_model.currentData()
         from scipy.optimize import curve_fit
-
         try:
             if model == "hyp":
                 def _hyp(t, qi, Di, b):
@@ -747,7 +870,6 @@ class WellAlignmentDialog(QDialog):
                 return float(popt[0]), float(np.clip(popt[1], 0.0, 5.0))
         except Exception:
             pass
-        # Fallback: log-linear for exponential
         if model == "exp":
             try:
                 log_q = np.log(np.clip(q, 1e-12, None))
@@ -757,6 +879,57 @@ class WellAlignmentDialog(QDialog):
                 pass
         return None
 
+    def _fit_trend(self, months: np.ndarray, values: np.ndarray) -> tuple | None:
+        """Fit a DCA trend using the selected model or best R².
+
+        Returns (qi, Di) for exp/har, (qi, Di, b) for hyp, or None.
+        In 'best' mode, tries all 3 and picks the one with highest R².
+        """
+        mask = values > 0
+        if np.sum(mask) < 3:
+            return None
+        model = self._cmb_pct_model.currentData()
+
+        if model == "best":
+            return self._fit_best(months, values)
+
+        return self._fit_single_model(months, values, model)
+
+    def _fit_best(self, months: np.ndarray, values: np.ndarray) -> tuple | None:
+        """Try exp, hyp, har and return the params with the highest R²."""
+        mask = values > 0
+        t = months[mask]
+        q = values[mask]
+        best_r2 = -1.0
+        best_params = None
+        for mdl in ("exp", "hyp", "har"):
+            params = self._fit_single_model(months, values, mdl)
+            if params is None:
+                continue
+            pred = self._predict_from_params(params, mdl, t)
+            ss_res = float(np.sum((q - pred) ** 2))
+            ss_tot = float(np.sum((q - np.mean(q)) ** 2))
+            r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 1.0
+            if r2 > best_r2:
+                best_r2 = r2
+                best_params = params
+        return best_params
+
+    @staticmethod
+    def _predict_from_params(params: tuple, model: str, t: np.ndarray) -> np.ndarray:
+        """Evaluate a DCA model at given t from a params tuple."""
+        if model == "hyp" and len(params) == 3:
+            qi, Di, b = params
+            base = 1.0 + b * Di * t
+            return qi / np.power(np.where(base > 0, base, 1e-12), 1.0 / b)
+        elif model == "har":
+            qi, Di = params[0], params[1]
+            return qi / (1.0 + Di * t)
+        else:  # exp
+            qi, Di = params[0], params[1]
+            return qi * np.exp(-Di * t)
+
+
     def _update_results_text(self) -> None:
         """Show R² and trend coefficients for P10/P50/P90 in the results box."""
         if not self._show_pct or self._pct_months is None or self._pct_data is None:
@@ -765,35 +938,41 @@ class WellAlignmentDialog(QDialog):
         model = self._cmb_pct_model.currentData()
         model_names = {"exp": "Экспоненциальная", "hyp": "Гиперболическая", "har": "Гармоническая"}
         lines = [f"Модель: {model_names.get(model, model)}"]
-        for pct_key in (90, 50, 10):  # display order: P10(high) P50 P90(low)
+        for pct_key in (90, 50, -1, 10):  # P10(high) P50 Avg P90(low)
             label = _PCT_LABELS[pct_key]
             trend = self._pct_trends.get(pct_key)
             data = self._pct_data.get(pct_key)
             if trend is None or data is None:
                 lines.append(f"{label}: не удалось подобрать")
                 continue
-            # Compute R²
             t = self._pct_months
             q = data
             mask = q > 0
             t_m, q_m = t[mask], q[mask]
-            if model == "hyp" and len(trend) == 3:
+            # Detect actual model from params shape
+            if len(trend) == 3:
                 qi, Di, b = trend
                 base = 1.0 + b * Di * t_m
                 pred = qi / np.power(np.where(base > 0, base, 1e-12), 1.0 / b)
-                params_str = f"qi={qi:.4g}, Di={Di:.4g}, b={b:.3f}"
-            elif model == "har":
-                qi, Di = trend[0], trend[1]
-                pred = qi / (1.0 + Di * t_m)
-                params_str = f"qi={qi:.4g}, Di={Di:.4g}"
+                params_str = f"qi={qi:.4g}, Di={Di:.4g}, b={b:.3f} [гип.]"
             else:
                 qi, Di = trend[0], trend[1]
-                pred = qi * np.exp(-Di * t_m)
-                params_str = f"qi={qi:.4g}, Di={Di:.4g}"
+                # Distinguish exp vs har by checking which fits better
+                pred_exp = qi * np.exp(-Di * t_m)
+                pred_har = qi / (1.0 + Di * t_m)
+                r2_exp = 1.0 - float(np.sum((q_m - pred_exp)**2)) / max(float(np.sum((q_m - np.mean(q_m))**2)), 1e-12)
+                r2_har = 1.0 - float(np.sum((q_m - pred_har)**2)) / max(float(np.sum((q_m - np.mean(q_m))**2)), 1e-12)
+                if model in ("har",) or (model == "best" and r2_har > r2_exp):
+                    pred = pred_har
+                    tag = "гарм."
+                else:
+                    pred = pred_exp
+                    tag = "эксп."
+                params_str = f"qi={qi:.4g}, Di={Di:.4g} [{tag}]"
             ss_res = float(np.sum((q_m - pred) ** 2))
             ss_tot = float(np.sum((q_m - np.mean(q_m)) ** 2))
             r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 1.0
-            lines.append(f"{label}: R²={r2:.4f}  {params_str}")
+            lines.append(f"{label}: R\u00b2={r2:.4f}  {params_str}")
         self._txt_result.setPlainText("\n".join(lines))
 
     # ── Data helpers ────────────────────────────────────────────────────
@@ -934,7 +1113,7 @@ class WellAlignmentDialog(QDialog):
             m = self._pct_months
             t_max = float(m[-1]) * 1.5
             model = self._cmb_pct_model.currentData()
-            for pct in (10, 50, 90):
+            for pct in (10, 50, -1, 90):
                 col = _PCT_COLORS[pct]
                 trend = self._pct_trends.get(pct)
                 if trend is None:
