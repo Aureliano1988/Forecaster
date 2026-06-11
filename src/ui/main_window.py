@@ -73,6 +73,7 @@ class MainWindow(QMainWindow):
         self._col_mapping: dict[str, str] = {}    # column mapping used at import time
         self._current_save_path: str = ""         # path of last saved .fcst file
         self._saved_results: dict[str, SavedMethodResult] = {}  # keyed by family|method
+        self._agg_cache: pd.DataFrame | None = None  # cached date-aggregated sub
 
         # ── Scenario management ───────────────────────────────────────────────
         self._scenarios: list[ForecastScenario] = []   # all named scenarios
@@ -160,7 +161,7 @@ class MainWindow(QMainWindow):
 
         # Скважины
         wells_menu = menu.addMenu("Скважины")
-        wells_menu.addAction(_act("Приведённая добыча по скважинам…", self._on_well_alignment))
+        wells_menu.addAction(_act("Приведённая добыча по скважинам…", self._on_well_alignment, "Ctrl+A"))
         wells_menu.addSeparator()
         wells_menu.addAction(_act("Группировка скважин по годам ввода…", self._on_well_vintage))
         wells_menu.addAction(_act("Графики Чена…", self._on_chan_plot))
@@ -444,6 +445,7 @@ class MainWindow(QMainWindow):
         self._lasso_exclude_paths.clear()
         self._saved_results.clear()   # underlying data changed
         self._fit_result_text = ""
+        self._agg_cache = None         # invalidate aggregation cache
         self._on_plot_data()
         self._sync_inspector()
 
@@ -1151,6 +1153,27 @@ class MainWindow(QMainWindow):
             return None, None
         return np.asarray(x, dtype=float), np.asarray(y, dtype=float)
 
+    def _get_agg_cache(self, sub: pd.DataFrame) -> pd.DataFrame:
+        """Return a cached date-aggregated DataFrame for the current well selection.
+
+        The cache is invalidated when wells change (``_on_wells_changed``).
+        All per-date aggregation callers should use this instead of doing
+        their own ``sub.groupby(COL_DATE)``.
+        """
+        if self._agg_cache is not None:
+            return self._agg_cache
+        agg_cols = {}
+        for c in (COL_OIL, COL_WATER, COL_GAS, COL_LIQUID,
+                  COL_HOURS_WORK, COL_WATER_CUT, COL_CUM_OIL):
+            if c in sub.columns:
+                agg_cols[c] = "sum"
+        if COL_WELL in sub.columns:
+            agg_cols[COL_WELL] = "nunique"  # for active-well count
+        if not agg_cols or COL_DATE not in sub.columns:
+            return pd.DataFrame()
+        self._agg_cache = sub.groupby(COL_DATE).agg(agg_cols).sort_index()
+        return self._agg_cache
+
     @staticmethod
     def _get_displacement_data(
         sub: pd.DataFrame,
@@ -1285,13 +1308,9 @@ class MainWindow(QMainWindow):
         tail_hours = agg_hours.iloc[-n_avg:]
         tail_wells = n_wells.reindex(tail_hours.index, fill_value=1)
 
-        total_prod_hours = 0.0
-        total_cal_hours = 0.0
-        for dt in tail_hours.index:
-            dim = pd.Timestamp(dt).days_in_month
-            nw = int(tail_wells.loc[dt])
-            total_prod_hours += float(tail_hours.loc[dt])
-            total_cal_hours += dim * 24.0 * nw
+        total_prod_hours = float(tail_hours.sum())
+        dims = pd.DatetimeIndex(tail_hours.index).days_in_month
+        total_cal_hours = float(np.sum(dims * 24.0 * tail_wells.values))
         if total_cal_hours <= 0:
             return 1.0
         return min(1.0, total_prod_hours / total_cal_hours)
@@ -2401,15 +2420,14 @@ class MainWindow(QMainWindow):
     def _agg_watercut(sub: pd.DataFrame) -> np.ndarray | None:
         if COL_WATER_CUT not in sub.columns or COL_DATE not in sub.columns:
             return None
-        # Weighted average water-cut by liquid volume
         if COL_LIQUID not in sub.columns:
             return None
-        # COL_LIQUID is already imported at module level — no local import needed
-
-        grp = sub.groupby(COL_DATE).apply(
-            lambda g: (g[COL_WATER_CUT] * g[COL_LIQUID]).sum()
-            / g[COL_LIQUID].sum()
-            if g[COL_LIQUID].sum() > 0
-            else 0.0
+        # Vectorized weighted average: Σ(fw·ql) / Σ(ql) per date
+        weighted = (sub[COL_WATER_CUT] * sub[COL_LIQUID]).groupby(sub[COL_DATE]).sum()
+        total_liq = sub[COL_LIQUID].groupby(sub[COL_DATE]).sum()
+        result = np.divide(
+            weighted.values, total_liq.values,
+            out=np.zeros(len(weighted), dtype=float),
+            where=total_liq.values > 0,
         )
-        return grp.sort_index().values.astype(float)
+        return result

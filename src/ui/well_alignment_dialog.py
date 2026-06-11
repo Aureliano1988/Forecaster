@@ -100,6 +100,9 @@ class WellAlignmentDialog(QDialog):
 
         self._build_ui()
 
+        # Pre-group by well for fast per-well access (avoids full-scan per well)
+        self._rebuild_well_groups()
+
         self._wells = self._producing_wells()
         self._populate_well_list()
         if self._scenarios:
@@ -331,7 +334,7 @@ class WellAlignmentDialog(QDialog):
 
         # Connections
         self._lst.itemSelectionChanged.connect(self._on_selection_changed)
-        self._chk_log.stateChanged.connect(self._draw)
+        self._chk_log.stateChanged.connect(self._toggle_log_scale)
         self._chk_normalize.stateChanged.connect(self._draw)
         self._cmb_phase.currentIndexChanged.connect(self._on_phase_changed)
         self._cmb_mode.currentIndexChanged.connect(self._on_mode_changed)
@@ -581,6 +584,7 @@ class WellAlignmentDialog(QDialog):
 
     def _on_phase_changed(self, _idx: int) -> None:
         self._phase = self._cmb_phase.currentData()
+        self._rebuild_well_groups()
         self._wells = self._producing_wells()
         self._populate_well_list()
         self._excluded.clear()
@@ -800,26 +804,27 @@ class WellAlignmentDialog(QDialog):
                                 "Выберите хотя бы один профиль для генерации.")
             return
 
-        months_list: list[float] = []
+        # Build 2D array (n_wells × max_month) for vectorized percentiles
+        n_series = len(series)
+        arr_2d = np.full((n_series, max_month), np.nan)
+        for i, (x, y) in enumerate(series.values()):
+            valid = np.isfinite(y) & (y > 0)
+            indices = (x[valid] - 1).astype(int)
+            arr_2d[i, indices] = y[valid]
+
+        # Keep only months with >= 3 valid wells
+        valid_count = np.sum(np.isfinite(arr_2d), axis=0)
+        month_mask = valid_count >= 3
+        months_all = np.arange(1, max_month + 1, dtype=float)
+        months_list = months_all[month_mask].tolist()
+        data = arr_2d[:, month_mask]
+
         p_vals: dict[int, list[float]] = {}
-        if gen_p90: p_vals[10] = []
-        if gen_p50: p_vals[50] = []
-        if gen_p10: p_vals[90] = []
-        if gen_avg: p_vals[-1] = []
-        for m in range(1, max_month + 1):
-            vals = []
-            for x, y in series.values():
-                if m <= len(y):
-                    v = y[m - 1]
-                    if np.isfinite(v) and v > 0:
-                        vals.append(v)
-            if len(vals) >= 3:
-                arr = np.array(vals)
-                months_list.append(float(m))
-                if gen_p90: p_vals[10].append(float(np.percentile(arr, 10)))
-                if gen_p50: p_vals[50].append(float(np.percentile(arr, 50)))
-                if gen_p10: p_vals[90].append(float(np.percentile(arr, 90)))
-                if gen_avg: p_vals[-1].append(float(arr.mean()))
+        if months_list:
+            if gen_p90: p_vals[10] = np.nanpercentile(data, 10, axis=0).tolist()
+            if gen_p50: p_vals[50] = np.nanpercentile(data, 50, axis=0).tolist()
+            if gen_p10: p_vals[90] = np.nanpercentile(data, 90, axis=0).tolist()
+            if gen_avg: p_vals[-1] = np.nanmean(data, axis=0).tolist()
         if not months_list:
             QMessageBox.warning(self, "Нет данных",
                                 "Нет месяцев с \u2265 3 скважинами с ненулевой добычей.")
@@ -977,14 +982,26 @@ class WellAlignmentDialog(QDialog):
 
     # ── Data helpers ────────────────────────────────────────────────────
 
-    def _producing_wells(self) -> list[str]:
-        prod_col = COL_GAS if self._phase == "gas" else COL_OIL
-        if COL_WELL not in self._df.columns or prod_col not in self._df.columns:
-            return []
+    def _rebuild_well_groups(self) -> None:
+        """Pre-filter to production rows and group by well.
+
+        Stores ``_df_prod`` and ``_well_groups`` so that per-well access
+        in ``_aligned_series`` is O(1) instead of a full-scan.
+        """
         sub = self._df
         if COL_WORK_TYPE in sub.columns:
             sub = sub[sub[COL_WORK_TYPE] == WORK_TYPE_OIL]
-        totals = sub.groupby(COL_WELL)[prod_col].sum()
+        self._df_prod = sub
+        if COL_WELL in sub.columns:
+            self._well_groups = sub.groupby(COL_WELL)
+        else:
+            self._well_groups = None
+
+    def _producing_wells(self) -> list[str]:
+        prod_col = COL_GAS if self._phase == "gas" else COL_OIL
+        if prod_col not in self._df_prod.columns:
+            return []
+        totals = self._df_prod.groupby(COL_WELL)[prod_col].sum()
         return sorted(totals[totals > 0].index.tolist())
 
     def _aligned_series(
@@ -1003,9 +1020,13 @@ class WellAlignmentDialog(QDialog):
         prod_col = COL_GAS if self._phase == "gas" else COL_OIL
         is_rate_mode = self._cmb_mode.currentData() == "rate"
 
-        sub = self._df[self._df[COL_WELL] == well].copy()
-        if COL_WORK_TYPE in sub.columns:
-            sub = sub[sub[COL_WORK_TYPE] == WORK_TYPE_OIL]
+        # Use pre-grouped data for O(1) per-well access
+        if self._well_groups is None:
+            return None
+        try:
+            sub = self._well_groups.get_group(well)
+        except KeyError:
+            return None
         if COL_DATE not in sub.columns or prod_col not in sub.columns:
             return None
 
@@ -1068,6 +1089,22 @@ class WellAlignmentDialog(QDialog):
         x = np.arange(1, len(y) + 1, dtype=float)
 
         return x, y, iso_dates
+
+    # ── Quick in-place toggles ────────────────────────────────────────────
+
+    def _toggle_log_scale(self, _state=None) -> None:
+        """Switch Y-axis log/linear scale in-place without full redraw."""
+        if not self._fig.axes:
+            self._draw()
+            return
+        ax = self._fig.axes[0]
+        try:
+            ax.set_yscale("log" if self._chk_log.isChecked() else "linear")
+            ax.relim()
+            ax.autoscale_view()
+            self._canvas.draw_idle()
+        except Exception:
+            self._draw()  # fallback to full redraw
 
     # ── Drawing ─────────────────────────────────────────────────────────────
 

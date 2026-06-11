@@ -51,6 +51,13 @@ class ChanPlotDialog(QDialog):
 
         self._build_ui()
 
+        # Pre-group by well for fast per-well access
+        sub = self._df
+        if COL_WORK_TYPE in sub.columns:
+            sub = sub[sub[COL_WORK_TYPE] == WORK_TYPE_OIL]
+        self._df_prod = sub
+        self._well_groups = sub.groupby(COL_WELL) if COL_WELL in sub.columns else None
+
         self._wells = self._producing_wells()
         for w in self._wells:
             self._lst.addItem(QListWidgetItem(w))
@@ -193,12 +200,9 @@ class ChanPlotDialog(QDialog):
     # ── Data helpers ───────────────────────────────────────────────────────────
 
     def _producing_wells(self) -> list[str]:
-        if COL_WELL not in self._df.columns or COL_OIL not in self._df.columns:
+        if self._df_prod is None or COL_OIL not in self._df_prod.columns:
             return []
-        sub = self._df
-        if COL_WORK_TYPE in sub.columns:
-            sub = sub[sub[COL_WORK_TYPE] == WORK_TYPE_OIL]
-        totals = sub.groupby(COL_WELL)[COL_OIL].sum()
+        totals = self._df_prod.groupby(COL_WELL)[COL_OIL].sum()
         return sorted(totals[totals > 0].index.tolist())
 
     def _chan_series(
@@ -210,9 +214,13 @@ class ChanPlotDialog(QDialog):
         Only months with qo > 0 and qw > 0 contribute to WOR.
         WOR' = ΔWOR / Δt (forward finite difference).
         """
-        sub = self._df[self._df[COL_WELL] == well].copy()
-        if COL_WORK_TYPE in sub.columns:
-            sub = sub[sub[COL_WORK_TYPE] == WORK_TYPE_OIL]
+        # Use pre-grouped data for O(1) per-well access
+        if self._well_groups is None:
+            return None
+        try:
+            sub = self._well_groups.get_group(well)
+        except KeyError:
+            return None
         if COL_DATE not in sub.columns or COL_OIL not in sub.columns:
             return None
         water_col = COL_WATER if COL_WATER in sub.columns else None
