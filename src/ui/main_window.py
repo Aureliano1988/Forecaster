@@ -143,6 +143,10 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(_act("Закрыть проект",          self._on_close_project,   "Ctrl+W"))
         file_menu.addSeparator()
+        self._act_project_info = _act("Информация о проекте…", self._on_project_info)
+        self._act_project_info.setEnabled(False)
+        file_menu.addAction(self._act_project_info)
+        file_menu.addSeparator()
         file_menu.addAction(_act("Экспорт графика (PNG/SVG)…",  self._on_export_plot,     "Ctrl+E"))
         file_menu.addAction(_act("Экспорт прогноза (CSV)…",   self._on_export_forecast, "Ctrl+Shift+E"))
         file_menu.addSeparator()
@@ -268,6 +272,7 @@ class MainWindow(QMainWindow):
         self._fit_result_text       = ""
         self._source_files          = []
         self._current_save_path     = ""
+        self._act_project_info.setEnabled(False)
         self._saved_results         = {}
         self._scenarios             = []
         self._active_scenario_idx   = 0
@@ -381,6 +386,7 @@ class MainWindow(QMainWindow):
         self._saved_results.clear()
         self._fit_result_text = ""
         self._current_save_path = ""        # data changed; clear associated project file
+        self._act_project_info.setEnabled(False)
         new_paths = [p for p, _ in valid_dfs]
         if append:
             combined = pd.concat([self.df, new_df], ignore_index=True)
@@ -2180,7 +2186,31 @@ class MainWindow(QMainWindow):
         )
         dlg.exec()
 
-    # ── Save / load project ─────────────────────────────────────────────
+    # ── Project info ───────────────────────────────────────────────
+
+    def _on_project_info(self) -> None:
+        """Show a read-only dialog with project metadata."""
+        lines: list[str] = []
+        lines.append(f"\u041d\u0430\u0437\u0432\u0430\u043d\u0438\u0435 \u043f\u0440\u043e\u0435\u043a\u0442\u0430:  {self._project_name or '\u2014'}")
+        lines.append(f"\u0424\u0430\u0439\u043b \u043f\u0440\u043e\u0435\u043a\u0442\u0430:  {self._current_save_path or '\u2014'}")
+        lines.append("")
+        if self._source_files:
+            lines.append("\u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u0438 \u0434\u0430\u043d\u043d\u044b\u0445:")
+            for p in self._source_files:
+                lines.append(f"  {p}")
+        else:
+            lines.append("\u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u0438 \u0434\u0430\u043d\u043d\u044b\u0445:  \u2014")
+        lines.append("")
+        lines.append(f"\u0421\u0446\u0435\u043d\u0430\u0440\u0438\u0435\u0432 \u043f\u0440\u043e\u0433\u043d\u043e\u0437\u0430:  {len(self._scenarios)}")
+        lines.append(f"\u0421\u0446\u0435\u043d\u0430\u0440\u0438\u0435\u0432 \u043f\u0440\u0438\u0432\u0435\u0434\u0451\u043d\u043d\u043e\u0439 \u0434\u043e\u0431\u044b\u0447\u0438:  {len(self._well_analysis_scenarios)}")
+
+        QMessageBox.information(
+            self,
+            "\u0418\u043d\u0444\u043e\u0440\u043c\u0430\u0446\u0438\u044f \u043e \u043f\u0440\u043e\u0435\u043a\u0442\u0435",
+            "\n".join(lines),
+        )
+
+    # ── Save / load project ─────────────────────────────────────────
 
     def _on_load_project(self) -> None:
         """Open a .fcst project file and restore all saved results."""
@@ -2266,6 +2296,7 @@ class MainWindow(QMainWindow):
         self._active_scenario_idx      = 0
         self._project_name             = project.get("project_name", "")
         self._current_save_path        = fcst_path
+        self._act_project_info.setEnabled(True)
         self._stoiip                   = project.get("stoiip", 0.0)
         self._hcpv                     = project.get("hcpv", 0.0)
         self._well_analysis_scenarios  = project.get("well_analysis_scenarios", [])
@@ -2347,6 +2378,7 @@ class MainWindow(QMainWindow):
                 well_analysis_scenarios=self._well_analysis_scenarios,
                 col_mapping=self._col_mapping,
             )
+            self._act_project_info.setEnabled(True)
             self.status.showMessage(f"Проект сохранён: {path}", 5000)
             return True
         except Exception as exc:
