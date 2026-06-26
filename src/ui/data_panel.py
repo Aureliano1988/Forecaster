@@ -5,6 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
@@ -42,8 +43,9 @@ def _read_well_list(path: str) -> list[str]:
 class DataPanel(QWidget):
     """Panel for loading files and selecting wells."""
 
-    wells_changed   = Signal(list)         # emits list of selected well names
-    filter_applied  = Signal(list, list)   # emits (found_wells, missing_wells)
+    wells_changed    = Signal(list)         # emits list of selected well names
+    filter_applied   = Signal(list, list)   # emits (found_wells, missing_wells)
+    scenario_changed = Signal(int)          # emits new scenario index
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -60,6 +62,15 @@ class DataPanel(QWidget):
         self.lbl_info = QLabel("Файл не загружен")
         self.lbl_info.setWordWrap(True)
         layout.addWidget(self.lbl_info)
+
+        # ── Scenario selector ───────────────────────────────────────────────
+        sc_row = QHBoxLayout()
+        sc_row.addWidget(QLabel("Сценарий:"))
+        self.cmb_scenario = QComboBox()
+        self.cmb_scenario.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        sc_row.addWidget(self.cmb_scenario, 1)
+        layout.addLayout(sc_row)
+        self.cmb_scenario.currentIndexChanged.connect(self._on_scenario_selected)
 
         # ── Well list ────────────────────────────────────────────────────────
         grp = QGroupBox("Скважины")
@@ -173,7 +184,17 @@ class DataPanel(QWidget):
         self.filter_applied.emit(found, missing)
         return found, missing
 
-    # ── Slots ────────────────────────────────────────────────────────
+    def populate_scenarios(self, names: list[str], active_idx: int = 0) -> None:
+        """Replace the scenario combo items and select *active_idx*."""
+        self.cmb_scenario.blockSignals(True)
+        self.cmb_scenario.clear()
+        for name in names:
+            self.cmb_scenario.addItem(name)
+        if names:
+            self.cmb_scenario.setCurrentIndex(max(0, min(active_idx, len(names) - 1)))
+        self.cmb_scenario.blockSignals(False)
+
+    # ── Slots ────────────────────────────────────────────────
 
     def _select_all(self) -> None:
         self.well_list.selectAll()
@@ -186,3 +207,7 @@ class DataPanel(QWidget):
 
     def _on_selection(self) -> None:
         self.wells_changed.emit(self.get_selected_wells())
+
+    def _on_scenario_selected(self, idx: int) -> None:
+        if idx >= 0:
+            self.scenario_changed.emit(idx)

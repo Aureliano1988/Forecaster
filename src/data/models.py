@@ -140,6 +140,9 @@ class WellAnalysisScenario:
     name:       str
     wells:      list[str]       = field(default_factory=list)
     phase:      str             = "oil"   # "oil" | "gas"
+    mode:       str             = "production"  # "production" | "rate"
+    min_rate:   float           = 1.0
+    min_days:   float           = 1.0
     # Excluded data points as [[well, iso_date_str], ...] for JSON stability
     excluded:   list[list]      = field(default_factory=list)
     # Percentile output — empty lists when not yet generated

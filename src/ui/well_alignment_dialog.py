@@ -144,19 +144,15 @@ class WellAlignmentDialog(QDialog):
         self._lbl_sc.setStyleSheet("font-size: 9px; color: #555;")
         left_lay.addWidget(self._lbl_sc)
 
-        # Phase
-        phase_row = QHBoxLayout()
-        phase_row.addWidget(QLabel("Флюид:"))
+        # Phase + mode on one row
+        phase_mode_row = QHBoxLayout()
+        phase_mode_row.addWidget(QLabel("Флюид:"))
         self._cmb_phase = QComboBox()
         self._cmb_phase.addItem("Нефть", "oil")
         self._cmb_phase.addItem("Газ",   "gas")
-        phase_row.addWidget(self._cmb_phase)
-        phase_row.addStretch()
-        left_lay.addLayout(phase_row)
-
-        # Data mode (production vs daily rate)
-        mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel("Режим:"))
+        phase_mode_row.addWidget(self._cmb_phase)
+        phase_mode_row.addSpacing(8)
+        phase_mode_row.addWidget(QLabel("Режим:"))
         self._cmb_mode = QComboBox()
         self._cmb_mode.addItem("Добыча", "production")
         self._cmb_mode.addItem("Дебит", "rate")
@@ -164,9 +160,16 @@ class WellAlignmentDialog(QDialog):
             "Добыча — месячная добыча (т/мес или м³/мес).\n"
             "Дебит — суточный дебит = добыча / (часы работы / 24)."
         )
-        mode_row.addWidget(self._cmb_mode)
-        mode_row.addStretch()
-        left_lay.addLayout(mode_row)
+        phase_mode_row.addWidget(self._cmb_mode)
+        phase_mode_row.addStretch()
+        left_lay.addLayout(phase_mode_row)
+
+        # Scenario combobox
+        sc_combo_row = QHBoxLayout()
+        sc_combo_row.addWidget(QLabel("Сценарий:"))
+        self._cmb_sc = QComboBox()
+        sc_combo_row.addWidget(self._cmb_sc, 1)
+        left_lay.addLayout(sc_combo_row)
 
         # Well list group
         grp_wells = QGroupBox("Скважины")
@@ -205,15 +208,34 @@ class WellAlignmentDialog(QDialog):
 
         left_lay.addWidget(grp_wells)
 
-        self._chk_log = QCheckBox("Log шкала (Y)")
-        left_lay.addWidget(self._chk_log)
-
+        # Log + Normalize on one row
+        chk_row1 = QHBoxLayout()
+        self._chk_log = QCheckBox("Log (Y)")
         self._chk_normalize = QCheckBox("Нормализовать")
         self._chk_normalize.setToolTip(
             "Разделить данные каждой скважины на первое\n"
             "ненулевое значение (после фильтров)."
         )
-        left_lay.addWidget(self._chk_normalize)
+        chk_row1.addWidget(self._chk_log)
+        chk_row1.addWidget(self._chk_normalize)
+        chk_row1.addStretch()
+        left_lay.addLayout(chk_row1)
+
+        # Weff + Active wells on one row
+        chk_row2 = QHBoxLayout()
+        self._chk_weff = QCheckBox("Wэфф (Y2)")
+        self._chk_weff.setToolTip(
+            "Коэффициент эксплуатации = \u03a3(раб. дней) / 30.44 / Nскв."
+        )
+        self._chk_active = QCheckBox("Акт. скв. (Y2)")
+        self._chk_active.setToolTip(
+            "Кол-во скважин с ненулевой добычей\n"
+            "(с учётом фильтров)."
+        )
+        chk_row2.addWidget(self._chk_weff)
+        chk_row2.addWidget(self._chk_active)
+        chk_row2.addStretch()
+        left_lay.addLayout(chk_row2)
 
         # Eraser
         eraser_row = QHBoxLayout()
@@ -336,6 +358,8 @@ class WellAlignmentDialog(QDialog):
         self._lst.itemSelectionChanged.connect(self._on_selection_changed)
         self._chk_log.stateChanged.connect(self._toggle_log_scale)
         self._chk_normalize.stateChanged.connect(self._draw)
+        self._chk_weff.stateChanged.connect(self._draw)
+        self._chk_active.stateChanged.connect(self._draw)
         self._cmb_phase.currentIndexChanged.connect(self._on_phase_changed)
         self._cmb_mode.currentIndexChanged.connect(self._on_mode_changed)
         self._btn_pct.clicked.connect(self._generate_percentiles)
@@ -345,6 +369,7 @@ class WellAlignmentDialog(QDialog):
         self._btn_undo_excl.clicked.connect(self._on_undo_exclusion)
         self._btn_scenarios.clicked.connect(self._on_open_scenarios)
         self._btn_save_sc.clicked.connect(self._on_save_scenario)
+        self._cmb_sc.currentIndexChanged.connect(self._on_sc_combo_changed)
         self._spn_min_rate.valueChanged.connect(self._on_filter_changed)
         self._spn_min_days.valueChanged.connect(self._on_filter_changed)
 
@@ -358,6 +383,25 @@ class WellAlignmentDialog(QDialog):
     def _update_scenario_label(self) -> None:
         name = self._scenario_label()
         self._lbl_sc.setText(f"Сценарий: {name}" if name else "")
+        self._refresh_sc_combo()
+
+    def _refresh_sc_combo(self) -> None:
+        """Sync the scenario combobox with the current scenarios list."""
+        self._cmb_sc.blockSignals(True)
+        self._cmb_sc.clear()
+        for sc in self._scenarios:
+            self._cmb_sc.addItem(sc.name)
+        if self._scenarios:
+            self._cmb_sc.setCurrentIndex(
+                max(0, min(self._active_idx, len(self._scenarios) - 1))
+            )
+        self._cmb_sc.blockSignals(False)
+
+    def _on_sc_combo_changed(self, idx: int) -> None:
+        """User picked a different scenario from the combobox."""
+        if idx < 0 or idx >= len(self._scenarios) or idx == self._active_idx:
+            return
+        self._on_scenario_activated(idx)
 
     def _load_scenario(self, idx: int) -> None:
         if idx < 0 or idx >= len(self._scenarios):
@@ -370,6 +414,20 @@ class WellAlignmentDialog(QDialog):
         self._cmb_phase.blockSignals(True)
         self._cmb_phase.setCurrentIndex(max(0, ci))
         self._cmb_phase.blockSignals(False)
+
+        # Restore mode
+        mi = self._cmb_mode.findData(getattr(sc, "mode", "production"))
+        self._cmb_mode.blockSignals(True)
+        self._cmb_mode.setCurrentIndex(max(0, mi))
+        self._cmb_mode.blockSignals(False)
+
+        # Restore filter criteria
+        self._spn_min_rate.blockSignals(True)
+        self._spn_min_rate.setValue(getattr(sc, "min_rate", 1.0))
+        self._spn_min_rate.blockSignals(False)
+        self._spn_min_days.blockSignals(True)
+        self._spn_min_days.setValue(getattr(sc, "min_days", 1.0))
+        self._spn_min_days.blockSignals(False)
 
         self._wells = self._producing_wells()
         self._populate_well_list()
@@ -405,6 +463,7 @@ class WellAlignmentDialog(QDialog):
         self._update_scenario_label()
         self._update_exclusion_ui()
         self._update_nav_buttons()
+        self._refresh_sc_combo()
         self._draw()
 
     def _collect_current_state(self) -> dict:
@@ -422,6 +481,9 @@ class WellAlignmentDialog(QDialog):
             }
         return dict(
             wells=selected, phase=self._phase, excluded=excl_list,
+            mode=self._cmb_mode.currentData(),
+            min_rate=self._spn_min_rate.value(),
+            min_days=self._spn_min_days.value(),
             pct_months=pct_months_list, pct_data=pct_data_dict,
             pct_trends=pct_trends_dict,
         )
@@ -430,6 +492,9 @@ class WellAlignmentDialog(QDialog):
         state = self._collect_current_state()
         sc.wells = state["wells"]
         sc.phase = state["phase"]
+        sc.mode = state["mode"]
+        sc.min_rate = state["min_rate"]
+        sc.min_days = state["min_days"]
         sc.excluded = state["excluded"]
         sc.pct_months = state["pct_months"]
         sc.pct_data = state["pct_data"]
@@ -449,6 +514,7 @@ class WellAlignmentDialog(QDialog):
             dlg.result_active_idx(), max(0, len(self._scenarios) - 1)
         )
         self._update_scenario_label()
+        self._refresh_sc_combo()
 
     def _on_scenario_activated(self, idx: int) -> None:
         # Ask to save the current scenario before switching
@@ -525,6 +591,7 @@ class WellAlignmentDialog(QDialog):
 
         self._apply_state_to_scenario(sc)
         self._update_scenario_label()
+        self._refresh_sc_combo()
         QMessageBox.information(
             self, "Сохранено",
             f"Сценарий \u00ab{sc.name}\u00bb сохранён."
@@ -936,11 +1003,12 @@ class WellAlignmentDialog(QDialog):
 
 
     def _update_results_text(self) -> None:
-        """Show R² and trend coefficients for P10/P50/P90 in the results box."""
+        """Show R², trend coefficients, and forecasted total production."""
         if not self._show_pct or self._pct_months is None or self._pct_data is None:
             self._txt_result.clear()
             return
         model = self._cmb_pct_model.currentData()
+        is_rate = self._cmb_mode.currentData() == "rate"
         model_names = {"exp": "Экспоненциальная", "hyp": "Гиперболическая", "har": "Гармоническая"}
         lines = [f"Модель: {model_names.get(model, model)}"]
         for pct_key in (90, 50, -1, 10):  # P10(high) P50 Avg P90(low)
@@ -962,7 +1030,6 @@ class WellAlignmentDialog(QDialog):
                 params_str = f"qi={qi:.4g}, Di={Di:.4g}, b={b:.3f} [гип.]"
             else:
                 qi, Di = trend[0], trend[1]
-                # Distinguish exp vs har by checking which fits better
                 pred_exp = qi * np.exp(-Di * t_m)
                 pred_har = qi / (1.0 + Di * t_m)
                 r2_exp = 1.0 - float(np.sum((q_m - pred_exp)**2)) / max(float(np.sum((q_m - np.mean(q_m))**2)), 1e-12)
@@ -977,7 +1044,16 @@ class WellAlignmentDialog(QDialog):
             ss_res = float(np.sum((q_m - pred) ** 2))
             ss_tot = float(np.sum((q_m - np.mean(q_m)) ** 2))
             r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 1.0
-            lines.append(f"{label}: R\u00b2={r2:.4f}  {params_str}")
+            # Forecasted total production from the trend
+            t_max = float(t[-1]) * 1.5
+            t_trend = np.arange(1, int(t_max) + 1, dtype=float)
+            y_trend = self._predict_from_params(trend, model if len(trend) != 3 else "hyp", t_trend)
+            if is_rate:
+                # rate mode: daily rate × 30.44 days/month × KЭ (0.95)
+                total = float(np.sum(y_trend * 30.44 * 0.95))
+            else:
+                total = float(np.sum(y_trend))
+            lines.append(f"{label}: R\u00b2={r2:.4f}  {params_str}  Сумма={total:,.0f}")
         self._txt_result.setPlainText("\n".join(lines))
 
     # ── Data helpers ────────────────────────────────────────────────────
@@ -1090,6 +1166,96 @@ class WellAlignmentDialog(QDialog):
 
         return x, y, iso_dates
 
+    def _compute_y2_overlay(
+        self, selected: list[str], need_weff: bool, need_active: bool,
+    ) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None] | None:
+        """Compute per-aligned-month Weff and/or active-wells count.
+
+        Because wells are aligned to their own first-production month,
+        "month m" means a different calendar date for each well.
+        For each aligned month m we aggregate across all selected wells
+        that have data at that month.
+
+        Weff  = sum(active_days_i) / 30.4375 / N_wells_with_data
+        Active = count of wells with non-NaN, non-zero production at month m
+        """
+        prod_col = COL_GAS if self._phase == "gas" else COL_OIL
+        # Gather per-well aligned data: {well: (y_array, hours_array_or_None)}
+        well_y: dict[str, np.ndarray] = {}
+        well_hours: dict[str, np.ndarray | None] = {}
+        max_month = 0
+        for well in selected:
+            result = self._aligned_series(well)
+            if result is None:
+                continue
+            x, y, iso_dates = result
+            well_y[well] = y
+            max_month = max(max_month, len(y))
+            # Get aligned hours for Weff
+            if need_weff and self._well_groups is not None:
+                try:
+                    sub = self._well_groups.get_group(well)
+                except KeyError:
+                    well_hours[well] = None
+                    continue
+                if COL_HOURS_WORK in sub.columns and COL_DATE in sub.columns:
+                    agg_h = sub.groupby(COL_DATE)[COL_HOURS_WORK].sum().sort_index()
+                    agg_p = sub.groupby(COL_DATE)[prod_col].sum().sort_index()
+                    pos = agg_p[agg_p > 0].index
+                    if len(pos) > 0:
+                        agg_h = agg_h[agg_h.index >= pos[0]]
+                        # Apply same leading-NaN trim as _aligned_series
+                        h_vals = agg_h.values.astype(float)
+                        # Trim to match y length
+                        if len(h_vals) > len(y):
+                            h_vals = h_vals[:len(y)]
+                        elif len(h_vals) < len(y):
+                            h_vals = np.pad(h_vals, (0, len(y) - len(h_vals)))
+                        # Zero out filtered months (where y is NaN)
+                        h_vals = np.where(np.isfinite(y) & (y > 0), h_vals, 0.0)
+                        well_hours[well] = h_vals
+                    else:
+                        well_hours[well] = None
+                else:
+                    well_hours[well] = None
+            else:
+                well_hours[well] = None
+
+        if max_month == 0 or not well_y:
+            return None
+
+        x_arr = np.arange(1, max_month + 1, dtype=float)
+        weff_arr: np.ndarray | None = None
+        active_arr: np.ndarray | None = None
+
+        if need_active:
+            active_arr = np.zeros(max_month, dtype=float)
+            for y in well_y.values():
+                valid = np.zeros(max_month, dtype=float)
+                n = min(len(y), max_month)
+                valid[:n] = np.where(np.isfinite(y[:n]) & (y[:n] > 0), 1.0, 0.0)
+                active_arr += valid
+
+        if need_weff:
+            sum_days = np.zeros(max_month, dtype=float)
+            n_wells_with_data = np.zeros(max_month, dtype=float)
+            for well, y in well_y.items():
+                n = min(len(y), max_month)
+                valid_mask = np.zeros(max_month, dtype=bool)
+                valid_mask[:n] = np.isfinite(y[:n]) & (y[:n] > 0)
+                n_wells_with_data += valid_mask.astype(float)
+                h = well_hours.get(well)
+                if h is not None:
+                    nh = min(len(h), max_month)
+                    sum_days[:nh] += np.where(valid_mask[:nh], h[:nh] / 24.0, 0.0)
+            weff_arr = np.divide(
+                sum_days, 30.4375 * n_wells_with_data,
+                out=np.full(max_month, np.nan),
+                where=n_wells_with_data > 0,
+            )
+
+        return x_arr, weff_arr, active_arr
+
     # ── Quick in-place toggles ────────────────────────────────────────────
 
     def _toggle_log_scale(self, _state=None) -> None:
@@ -1191,6 +1357,36 @@ class WellAlignmentDialog(QDialog):
             except Exception:
                 pass
 
+        # ── Secondary Y-axis overlays (Weff / active wells) ─────────────
+        ax2 = None
+        show_weff = self._chk_weff.isChecked()
+        show_active = self._chk_active.isChecked()
+        if (show_weff or show_active) and selected:
+            y2_data = self._compute_y2_overlay(selected, show_weff, show_active)
+            if y2_data is not None:
+                ax2 = ax.twinx()
+                x_y2, weff_arr, active_arr = y2_data
+                y2_labels: list[str] = []
+                if show_weff and weff_arr is not None:
+                    ax2.plot(x_y2, weff_arr, color='darkorange', linewidth=1.2,
+                             linestyle='--', alpha=0.7, label='Wэфф')
+                    y2_labels.append('Wэфф')
+                if show_active and active_arr is not None:
+                    ax2.step(x_y2, active_arr, where='mid', color='steelblue',
+                             linewidth=1.2, linestyle='--', alpha=0.7, label='Акт. скв.')
+                    y2_labels.append('Акт. скв.')
+                if y2_labels:
+                    ax2.set_ylabel(' / '.join(y2_labels), fontsize=9)
+                    ax2.tick_params(axis='y', labelsize=8)
+                    if show_weff and not show_active:
+                        ax2.set_ylim(0, 1.05)
+                    elif show_active and not show_weff:
+                        from matplotlib.ticker import MaxNLocator as _MNL
+                        ax2.yaxis.set_major_locator(_MNL(integer=True, nbins=5))
+                        ax2.set_ylim(bottom=0)
+                    else:
+                        ax2.set_ylim(bottom=0)
+
         handles, labels = ax.get_legend_handles_labels()
         if handles:
             if self._show_pct:
@@ -1198,7 +1394,7 @@ class WellAlignmentDialog(QDialog):
                 handles = [h for h, lbl in zip(handles, labels) if lbl in pct_lbls]
                 labels  = [lbl for lbl in labels if lbl in pct_lbls]
             from src.ui.legend_helper import fit_legend
-            fit_legend(ax, handles, labels, loc="upper right")
+            fit_legend(ax, handles, labels, extra_ax=ax2, loc="upper right")
 
         ax.grid(True, alpha=0.3)
         self._canvas.draw_idle()
@@ -1227,21 +1423,52 @@ class WellAlignmentDialog(QDialog):
             max_month = max(max_month, int(self._pct_months[-1] * 1.5))
         if max_month == 0:
             return
-        pct_lookup: dict[int, list[float]] = {}
+
+        # Determine which profiles are selected
+        # Checkbox → pct_data key mapping (petroleum convention)
+        active_profiles: list[tuple[int, str]] = []  # (key, label)
+        if self._chk_p90.isChecked(): active_profiles.append((10, _PCT_LABELS[10]))   # P90
+        if self._chk_p50.isChecked(): active_profiles.append((50, _PCT_LABELS[50]))   # P50
+        if self._chk_avg.isChecked(): active_profiles.append((-1, _PCT_LABELS[-1]))   # Среднее
+        if self._chk_p10.isChecked(): active_profiles.append((90, _PCT_LABELS[90]))   # P10
+
+        # Build per-month lookup for the selected fact profiles
+        pct_lookup: dict[int, dict[int, float]] = {}
         if has_pct:
             for i, mo in enumerate(self._pct_months):
-                pct_lookup[int(mo)] = [
-                    float(self._pct_data[10][i]),
-                    float(self._pct_data[50][i]),
-                    float(self._pct_data[90][i]),
-                ]
+                vals: dict[int, float] = {}
+                for key, _ in active_profiles:
+                    if key in self._pct_data:
+                        vals[key] = float(self._pct_data[key][i])
+                pct_lookup[int(mo)] = vals
+
+        # Compute Y2 overlay data if checkboxes are on
+        copy_weff = self._chk_weff.isChecked()
+        copy_active = self._chk_active.isChecked()
+        weff_arr: np.ndarray | None = None
+        active_arr: np.ndarray | None = None
+        if (copy_weff or copy_active) and selected:
+            y2 = self._compute_y2_overlay(selected, copy_weff, copy_active)
+            if y2 is not None:
+                _, weff_arr, active_arr = y2
+                if weff_arr is not None:
+                    max_month = max(max_month, len(weff_arr))
+                if active_arr is not None:
+                    max_month = max(max_month, len(active_arr))
+
         hdr = ["Месяц"] + list(well_data.keys())
         if has_pct:
-            hdr += ["P10 факт", "P50 факт", "P90 факт"]
+            for _, lbl in active_profiles:
+                hdr.append(f"{lbl} факт")
         if has_trend:
-            for pct in (10, 50, 90):
-                if self._pct_trends.get(pct) is not None:
-                    hdr.append(f"P{pct} тренд")
+            for key, lbl in active_profiles:
+                if self._pct_trends.get(key) is not None:
+                    hdr.append(f"{lbl} тренд")
+        if copy_weff and weff_arr is not None:
+            hdr.append("Wэфф")
+        if copy_active and active_arr is not None:
+            hdr.append("Акт. скв.")
+
         rows = ["\t".join(hdr)]
         for m in range(1, max_month + 1):
             row = [str(m)]
@@ -1249,14 +1476,14 @@ class WellAlignmentDialog(QDialog):
                 v = y[m - 1] if m <= len(y) else np.nan
                 row.append(f"{v:.4g}" if np.isfinite(v) else "")
             if has_pct:
-                row += (
-                    [f"{v:.4g}" for v in pct_lookup[m]]
-                    if m in pct_lookup else ["", "", ""]
-                )
+                vals_m = pct_lookup.get(m, {})
+                for key, _ in active_profiles:
+                    v = vals_m.get(key)
+                    row.append(f"{v:.4g}" if v is not None else "")
             if has_trend:
                 model = self._cmb_pct_model.currentData()
-                for pct in (10, 50, 90):
-                    tr = self._pct_trends.get(pct)
+                for key, _ in active_profiles:
+                    tr = self._pct_trends.get(key)
                     if tr is not None:
                         qi, Di = tr[0], tr[1]
                         if model == "hyp" and len(tr) == 3:
@@ -1268,6 +1495,12 @@ class WellAlignmentDialog(QDialog):
                         else:
                             val = qi * np.exp(-Di * m)
                         row.append(f"{val:.4g}")
+            if copy_weff and weff_arr is not None:
+                v = weff_arr[m - 1] if m <= len(weff_arr) else np.nan
+                row.append(f"{v:.4f}" if np.isfinite(v) else "")
+            if copy_active and active_arr is not None:
+                v = active_arr[m - 1] if m <= len(active_arr) else 0
+                row.append(f"{int(v)}" if v > 0 else "")
             rows.append("\t".join(row))
         QApplication.instance().clipboard().setText("\n".join(rows))
 

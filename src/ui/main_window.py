@@ -182,6 +182,7 @@ class MainWindow(QMainWindow):
         self.method_panel.autofit_all_requested.connect(self._on_autofit_all)
         self.method_panel.edit_toggled.connect(self._on_edit_toggle)
         self.data_panel.filter_applied.connect(self._on_filter_applied)
+        self.data_panel.scenario_changed.connect(self._on_scenario_combo_changed)
         self.data_panel.chk_active_wells.stateChanged.connect(self._on_plot_data)
         self.method_panel.cmb_dca_mode.currentIndexChanged.connect(self._on_plot_data)
 
@@ -189,7 +190,11 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         """Ask to save before quitting (handles both the X button and Quit action)."""
-        has_work = bool(self._saved_results) or any(s.results for s in self._scenarios)
+        has_work = (
+            bool(self._saved_results)
+            or any(s.results for s in self._scenarios)
+            or (self.df is not None and not self._current_save_path)
+        )
         if not has_work:
             event.accept()
             return
@@ -230,7 +235,11 @@ class MainWindow(QMainWindow):
 
     def _on_close_project(self) -> None:
         """Return to the initial empty state, prompting to save if needed."""
-        has_work = bool(self._saved_results) or any(s.results for s in self._scenarios)
+        has_work = (
+            bool(self._saved_results)
+            or any(s.results for s in self._scenarios)
+            or (self.df is not None and not self._current_save_path)
+        )
         if has_work:
             reply = QMessageBox.question(
                 self,
@@ -291,6 +300,7 @@ class MainWindow(QMainWindow):
         self.method_panel.set_edit_enabled(False)
         self.method_panel.btn_eraser.setChecked(False)
 
+        self._refresh_scenario_combo()
         self._on_plot_data()
         self.status.showMessage("Проект закрыт", 3000)
 
@@ -429,6 +439,7 @@ class MainWindow(QMainWindow):
             self._active_scenario_idx = 0
 
         self._update_window_title()
+        self._refresh_scenario_combo()
 
     # ── Well selection → plot
 
@@ -509,6 +520,59 @@ class MainWindow(QMainWindow):
             title += f" [{self._scenarios[self._active_scenario_idx].name}]"
         self.setWindowTitle(title)
 
+    def _refresh_scenario_combo(self) -> None:
+        """Sync the scenario combobox with the current scenarios list."""
+        names = [sc.name for sc in self._scenarios]
+        self.data_panel.populate_scenarios(names, self._active_scenario_idx)
+
+    def _scenario_has_changes(self) -> bool:
+        """Return True if working buffers differ from the loaded snapshot."""
+        snap = getattr(self, "_scenario_snapshot", None)
+        if not snap:
+            return bool(self._saved_results) or bool(self._selected_wells)
+        if sorted(self._selected_wells) != sorted(snap["wells"]):
+            return True
+        if set(self._saved_results.keys()) != set(snap["results"].keys()):
+            return True
+        return False
+
+    def _on_scenario_combo_changed(self, idx: int) -> None:
+        """User picked a different scenario from the combobox."""
+        if idx < 0 or idx >= len(self._scenarios):
+            return
+        if idx == self._active_scenario_idx:
+            return
+        # Only prompt if there are actual changes vs. the loaded state
+        if self._scenario_has_changes() and self._scenarios:
+            sc_name = self._scenarios[self._active_scenario_idx].name
+            reply = QMessageBox.question(
+                self,
+                "Смена сценария",
+                f"Сохранить сценарий \u00ab{sc_name}\u00bb?",
+                QMessageBox.StandardButton.Save |
+                QMessageBox.StandardButton.Discard |
+                QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Save,
+            )
+            if reply == QMessageBox.StandardButton.Cancel:
+                # Revert the combobox to the current scenario without triggering signals
+                self.data_panel.cmb_scenario.blockSignals(True)
+                self.data_panel.cmb_scenario.setCurrentIndex(self._active_scenario_idx)
+                self.data_panel.cmb_scenario.blockSignals(False)
+                return
+            if reply == QMessageBox.StandardButton.Save:
+                self._commit_active_scenario()
+            else:
+                # Discard: restore snapshot so implicit commits are undone
+                snap = getattr(self, "_scenario_snapshot", None)
+                if snap:
+                    old_sc = self._scenarios[self._active_scenario_idx]
+                    old_sc.wells = snap["wells"]
+                    old_sc.results = snap["results"]
+                    old_sc.dca_mode = snap["dca_mode"]
+        self._load_scenario_into_buffers(idx)
+        self._sync_inspector()
+
     # ── Scenario helpers ────────────────────────────────────────────────
 
     def _commit_active_scenario(self) -> None:
@@ -530,6 +594,13 @@ class MainWindow(QMainWindow):
         """
         self._active_scenario_idx = idx
         sc = self._scenarios[idx]
+        # Snapshot for the Discard path: if _sync_inspector auto-committed
+        # working changes, we can restore the original state.
+        self._scenario_snapshot = {
+            "wells": list(sc.wells),
+            "results": dict(sc.results),
+            "dca_mode": getattr(sc, "dca_mode", "production"),
+        }
 
         self._selected_wells  = list(sc.wells)
         self._saved_results   = dict(sc.results)
@@ -556,6 +627,7 @@ class MainWindow(QMainWindow):
         self.data_panel.well_list.blockSignals(False)
 
         self._update_window_title()
+        self._refresh_scenario_combo()
         self._on_plot_data()
 
     def _get_sub(self) -> pd.DataFrame | None:
@@ -605,6 +677,10 @@ class MainWindow(QMainWindow):
                         ax.scatter(x, y, s=4, label="Факт")
                         ax.set_xlabel(method_cls.x_label)
                         ax.set_ylabel(method_cls.y_label)
+                        # Pirverdyan (1/√Ql) and Guseinov (1/Ql): X starts at 0
+                        from src.forecasting.displacement import Pirverdyan, Guseinov
+                        if method_cls in (Pirverdyan, Guseinov):
+                            ax.set_xlim(left=0)
                 elif family == "Кривые падения добычи (DCA)":
                     _phase = self._active_phase()
                     _dca_col = COL_GAS if _phase == "gas" else COL_OIL
@@ -1070,9 +1146,9 @@ class MainWindow(QMainWindow):
             monthly=monthly,
             qo_hist_last=Qo_last,
         )
-        self._sync_inspector()
+        self._update_window_title()
 
-    # ── Export ────────────────────────────────────────────────────────────────
+    # ── Export plot ───────────────────────────────────────────────────────
 
     def _on_export_plot(self) -> None:
         from PySide6.QtWidgets import QFileDialog
@@ -1921,8 +1997,12 @@ class MainWindow(QMainWindow):
             well_analysis_scenarios=self._well_analysis_scenarios,
             parent=self,
         )
-        dlg.exec()
-        # Retrieve updated scenarios list
+        dlg.finished.connect(lambda: self._on_well_alignment_closed(dlg))
+        dlg.show()
+        dlg.raise_()
+
+    def _on_well_alignment_closed(self, dlg) -> None:
+        """Retrieve updated scenarios when the alignment dialog closes."""
         self._well_analysis_scenarios = dlg.result_scenarios()
 
     def _on_well_vintage(self) -> None:
@@ -1976,6 +2056,9 @@ class MainWindow(QMainWindow):
         if eff_stoiip > 0:
             sc_hist["RF"] = Qo / eff_stoiip
 
+        eff_hcpv = sc.hcpv if sc.hcpv > 0 else self._hcpv
+        n_prod = len(qo)
+
         if COL_WORK_TYPE in self.df.columns and COL_WATER in self.df.columns:
             from src.data.models import WORK_TYPE_INJ
             inj = self.df[
@@ -1994,11 +2077,16 @@ class MainWindow(QMainWindow):
                     qi_cum = np.cumsum(qi_arr)
                     sc_hist["qi_inj"] = qi_arr
                     sc_hist["Qi_inj"] = qi_cum
-                    eff_hcpv = sc.hcpv if sc.hcpv > 0 else self._hcpv
                     if eff_hcpv > 0 and len(qi_cum) > 0:
                         sc_hist["HCPVI"] = qi_cum / eff_hcpv
                 except Exception:
                     pass
+
+        # Ensure HCPVI exists (zeros) even when there is no injection
+        if "HCPVI" not in sc_hist and eff_hcpv > 0 and n_prod > 0:
+            sc_hist["qi_inj"] = np.zeros(n_prod, dtype=float)
+            sc_hist["Qi_inj"] = np.zeros(n_prod, dtype=float)
+            sc_hist["HCPVI"]  = np.zeros(n_prod, dtype=float)
 
         return sc_hist
 
@@ -2080,6 +2168,7 @@ class MainWindow(QMainWindow):
                     hist_data["RF"] = Qo / eff_stoiip_hist
 
                 # Injection history aligned to production dates
+                n_prod = len(qo)
                 if COL_WORK_TYPE in self.df.columns and COL_WATER in self.df.columns:
                     from src.data.models import WORK_TYPE_INJ
                     inj_df = self.df[
@@ -2106,6 +2195,12 @@ class MainWindow(QMainWindow):
                         hist_data["Qi_inj"] = qi_cum       # cumulative injection
                         if eff_hcpv_hist > 0 and len(qi_cum) > 0:
                             hist_data["HCPVI"] = qi_cum / eff_hcpv_hist
+
+                # Ensure HCPVI exists (zeros) even when there is no injection
+                if "HCPVI" not in hist_data and eff_hcpv_hist > 0 and n_prod > 0:
+                    hist_data["qi_inj"] = np.zeros(n_prod, dtype=float)
+                    hist_data["Qi_inj"] = np.zeros(n_prod, dtype=float)
+                    hist_data["HCPVI"]  = np.zeros(n_prod, dtype=float)
 
         # Commit current scenario so all scenarios are up-to-date
         self._commit_active_scenario()
@@ -2434,6 +2529,7 @@ class MainWindow(QMainWindow):
         self._load_scenario_into_buffers(idx)
         # Update the active indicator in the dialog
         self._inspector_dlg.refresh_active(idx)
+        self._refresh_scenario_combo()
         self.status.showMessage(f"Активирован сценарий: {self._scenarios[idx].name}", 3000)
 
     def _on_inspector_finished(self) -> None:
@@ -2452,6 +2548,7 @@ class MainWindow(QMainWindow):
             self._load_scenario_into_buffers(new_active)
         else:
             self._update_window_title()
+        self._refresh_scenario_combo()
 
     # ── Data helpers ─────────────────────────────────────────────────────
 

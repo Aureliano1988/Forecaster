@@ -68,7 +68,10 @@ def fit_legend(
     else:
         fontsize, ncol = 5, max(4, (n + 7) // 8)
 
-    leg = ax.legend(handles, labels, fontsize=fontsize, loc=loc, ncol=ncol)
+    # Place legend on the topmost axes layer so it stays draggable
+    # when a twinx overlay is present.
+    target = extra_ax if extra_ax is not None else ax
+    leg = target.legend(handles, labels, fontsize=fontsize, loc=loc, ncol=ncol)
     if leg is not None:
         leg.set_draggable(True)
     return leg
