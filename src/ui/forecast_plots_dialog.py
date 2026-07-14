@@ -61,19 +61,23 @@ _Y_VARS = [
     ("Закачка, т/мес",        "qi_inj", "Закачка, т/мес"),
     ("Нак. закачка, т",       "Qi_inj", "Нак. закачка, т"),
     ("HCPVI",                  "HCPVI",  "HCPVI"),
+    ("Комп. тек. (qinj/qliq)",  "comp_cur", "Компенсация тек."),
+    ("Комп. нак. (Qinj/Qliq)",  "comp_tot", "Компенсация нак."),
 ]
 
 # default (enabled, axis 1 or 2)
 _Y_DEFAULTS: dict[str, tuple[bool, int]] = {
-    "qo":     (True,  1),
-    "WOR":    (True,  2),
-    "Qo":     (False, 1),
-    "ql":     (False, 1),
-    "Ql":     (False, 1),
-    "RF":     (False, 1),
-    "qi_inj": (False, 1),
-    "Qi_inj": (False, 1),
-    "HCPVI":  (False, 1),
+    "qo":       (True,  1),
+    "WOR":      (True,  2),
+    "Qo":       (False, 1),
+    "ql":       (False, 1),
+    "Ql":       (False, 1),
+    "RF":       (False, 1),
+    "qi_inj":   (False, 1),
+    "Qi_inj":   (False, 1),
+    "HCPVI":    (False, 1),
+    "comp_cur": (False, 2),
+    "comp_tot": (False, 2),
 }
 
 # 20-colour palette -----------------------------------------------------------
@@ -97,7 +101,7 @@ def _arr(result, attr: str) -> np.ndarray:
 
 
 # Attrs that require external reservoir/injection parameters to compute
-_SPECIAL_ATTRS = {"RF", "HCPVI", "qi_inj", "Qi_inj"}
+_SPECIAL_ATTRS = {"RF", "HCPVI", "qi_inj", "Qi_inj", "comp_cur", "comp_tot"}
 
 
 # ── Y-variable row ────────────────────────────────────────────────────────────
@@ -241,7 +245,7 @@ class ForecastPlotsDialog(QDialog):
             item = QListWidgetItem(f"{mname}  [{short}]")
             item.setData(Qt.ItemDataRole.UserRole, key)
             self._lst.addItem(item)
-        self._lst.selectAll()
+        # No methods selected by default — history shows first
         gm_lay.addWidget(self._lst)
         _m_btns = QHBoxLayout()
         _btn_m_all = QPushButton("Все")
@@ -480,6 +484,20 @@ class ForecastPlotsDialog(QDialog):
             if eff_hcpv > 0:
                 return (eff_qi_hist_last + eff_qi_const * m_arr) / eff_hcpv
             return np.zeros(s.duration, dtype=float)
+        elif y_attr == "comp_cur":
+            ql_arr = np.asarray(s.ql, dtype=float)
+            return np.divide(
+                eff_qi_const, ql_arr,
+                out=np.zeros(s.duration, dtype=float), where=ql_arr > 0,
+            )
+        elif y_attr == "comp_tot":
+            m_arr = np.arange(1, s.duration + 1, dtype=float)
+            Ql_arr = ql_last + np.asarray(s.Ql, dtype=float)
+            Qi_arr = eff_qi_hist_last + eff_qi_const * m_arr
+            return np.divide(
+                Qi_arr, Ql_arr,
+                out=np.zeros(s.duration, dtype=float), where=Ql_arr > 0,
+            )
         return np.asarray(getattr(s, y_attr), dtype=float)
 
     # ── Mode toggle ───────────────────────────────────────────────────
@@ -577,8 +595,6 @@ class ForecastPlotsDialog(QDialog):
             item.data(Qt.ItemDataRole.UserRole)
             for item in self._lst.selectedItems()
         ]
-        if not selected_keys:
-            return
 
         _, x_attr, x_label = _X_VARS[self._cmb_x.currentIndex()]
         hist = self._hist
@@ -596,7 +612,10 @@ class ForecastPlotsDialog(QDialog):
         if not enabled_yvars:
             return
 
-        max_dur = max(self._data[k].monthly.duration for k in selected_keys)
+        max_dur = (
+            max(self._data[k].monthly.duration for k in selected_keys)
+            if selected_keys else 0
+        )
 
         # Pre-compute x and y arrays per method (using helpers that handle RF/HCPVI)
         method_x: dict[str, np.ndarray] = {}
@@ -624,8 +643,12 @@ class ForecastPlotsDialog(QDialog):
         n_hist = len(hist["qo"]) if hist and "qo" in hist else 0
         use_dates = x_attr == "date" and self._last_hist_date is not None
         hist_yvars = [
-            (a, l) for a, l in enabled_yvars if a in hist
+            (a, l) for a, l in enabled_yvars if hist and a in hist
         ] if include_hist and n_hist > 0 else []
+
+        # Nothing to copy
+        if not selected_keys and not hist_yvars:
+            return
 
         # Header
         hdr = ["Дата" if use_dates else "Месяц"]
@@ -634,7 +657,7 @@ class ForecastPlotsDialog(QDialog):
         for y_attr, ylbl in enabled_yvars:
             for key in selected_keys:
                 hdr.append(f"{method_names[key]} — {ylbl}")
-        if x_attr not in ("month", "date"):
+        if x_attr not in ("month", "date") and selected_keys:
             for key in selected_keys:
                 hdr.append(f"{method_names[key]} — {x_label}")
         if pct_method_y:
@@ -664,7 +687,7 @@ class ForecastPlotsDialog(QDialog):
                     else:
                         row.append("")
             # X-axis columns (non-standard, forecast only)
-            if x_attr not in ("month", "date"):
+            if x_attr not in ("month", "date") and selected_keys:
                 for key in selected_keys:
                     if m >= 1:
                         xa = method_x[key]
@@ -1018,9 +1041,6 @@ class ForecastPlotsDialog(QDialog):
             item.data(Qt.ItemDataRole.UserRole)
             for item in self._lst.selectedItems()
         ]
-        if not selected_keys:
-            self._canvas.draw_idle()
-            return
 
         needs_y2 = any(r.enabled and r.axis == 2 for r in self._y_rows)
         if needs_y2:
@@ -1039,7 +1059,7 @@ class ForecastPlotsDialog(QDialog):
         y1_labels: list[str] = []
         y2_labels: list[str] = []
 
-        # ── Forecast lines ──────────────────────────────────────────
+        # ── Forecast lines (only when methods are selected) ──────────────
         for ki, key in enumerate(selected_keys):
             result = self._data[key]
             _, mname = key.split("|", 1)

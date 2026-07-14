@@ -161,6 +161,8 @@ class MainWindow(QMainWindow):
         forecast_menu.addAction(_act("Сводка прогнозов…",  self._on_forecast_summary))
         forecast_menu.addAction(_act("Графики прогнозов…", self._on_forecast_plots, "Ctrl+F"))
         forecast_menu.addSeparator()
+        forecast_menu.addAction(_act("Карточка объекта…",  self._on_object_info))
+        forecast_menu.addSeparator()
         forecast_menu.addAction(_act("Экспорт данных…",    self._on_export_data,    "Ctrl+D"))
 
         # Скважины
@@ -2088,6 +2090,21 @@ class MainWindow(QMainWindow):
             sc_hist["Qi_inj"] = np.zeros(n_prod, dtype=float)
             sc_hist["HCPVI"]  = np.zeros(n_prod, dtype=float)
 
+        # Compensation: current (qinj/qliq) and total (Qinj/Qliq)
+        if "qi_inj" in sc_hist and n_prod > 0:
+            qi_h = np.asarray(sc_hist["qi_inj"], dtype=float)
+            ql_h = np.asarray(sc_hist["ql"], dtype=float)
+            Qi_h = np.asarray(sc_hist["Qi_inj"], dtype=float)
+            Ql_h = np.asarray(sc_hist["Ql"], dtype=float)
+            sc_hist["comp_cur"] = np.divide(
+                qi_h, ql_h,
+                out=np.zeros(n_prod, dtype=float), where=ql_h > 0,
+            )
+            sc_hist["comp_tot"] = np.divide(
+                Qi_h, Ql_h,
+                out=np.zeros(n_prod, dtype=float), where=Ql_h > 0,
+            )
+
         return sc_hist
 
     def _active_phase(self) -> str:
@@ -2202,6 +2219,21 @@ class MainWindow(QMainWindow):
                     hist_data["Qi_inj"] = np.zeros(n_prod, dtype=float)
                     hist_data["HCPVI"]  = np.zeros(n_prod, dtype=float)
 
+                # Compensation: current (qinj/qliq) and total (Qinj/Qliq)
+                if "qi_inj" in hist_data and n_prod > 0:
+                    qi_h = np.asarray(hist_data["qi_inj"], dtype=float)
+                    ql_h = np.asarray(hist_data["ql"], dtype=float)
+                    Qi_h = np.asarray(hist_data["Qi_inj"], dtype=float)
+                    Ql_h = np.asarray(hist_data["Ql"], dtype=float)
+                    hist_data["comp_cur"] = np.divide(
+                        qi_h, ql_h,
+                        out=np.zeros(n_prod, dtype=float), where=ql_h > 0,
+                    )
+                    hist_data["comp_tot"] = np.divide(
+                        Qi_h, Ql_h,
+                        out=np.zeros(n_prod, dtype=float), where=Ql_h > 0,
+                    )
+
         # Commit current scenario so all scenarios are up-to-date
         self._commit_active_scenario()
 
@@ -2224,6 +2256,32 @@ class MainWindow(QMainWindow):
             n_avg=self.method_panel.get_n_avg(),
             scenarios=self._scenarios,
             scenarios_hist=scenarios_hist,
+            parent=self,
+        )
+        dlg.exec()
+
+    def _on_object_info(self) -> None:
+        """Open the object info card dashboard."""
+        if self.df is None or not self._selected_wells:
+            self.status.showMessage("Нет данных для отображения", 3000)
+            return
+        self._commit_active_scenario()
+        eff_stoiip = self._sc_stoiip()
+        # EUR from the currently selected method in the active scenario
+        eur = 0.0
+        active_key = self._result_key()
+        results = self._saved_results
+        if active_key in results:
+            r = results[active_key]
+            if r.monthly and r.monthly.duration > 0:
+                eur = r.qo_hist_last + r.monthly.remain_reserves
+        from src.ui.object_info_dialog import ObjectInfoDialog
+        dlg = ObjectInfoDialog(
+            self.df,
+            self._selected_wells,
+            project_name=self._project_name,
+            stoiip=eff_stoiip,
+            eur=eur,
             parent=self,
         )
         dlg.exec()
