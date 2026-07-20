@@ -46,6 +46,7 @@ class DataPanel(QWidget):
     wells_changed    = Signal(list)         # emits list of selected well names
     filter_applied   = Signal(list, list)   # emits (found_wells, missing_wells)
     scenario_changed = Signal(int)          # emits new scenario index
+    criteria_requested = Signal()           # user clicked "select by criteria"
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -90,6 +91,9 @@ class DataPanel(QWidget):
         self.btn_filter = QPushButton("Фильтр скважин…")
         grp_layout.addWidget(self.btn_filter)
 
+        self.btn_criteria = QPushButton("Выбрать по критерию…")
+        grp_layout.addWidget(self.btn_criteria)
+
         self.lbl_filter = QLabel("")
         self.lbl_filter.setWordWrap(True)
         grp_layout.addWidget(self.lbl_filter)
@@ -108,6 +112,7 @@ class DataPanel(QWidget):
         self.btn_select_all.clicked.connect(self._select_all)
         self.btn_select_none.clicked.connect(self._deselect_all)
         self.btn_filter.clicked.connect(self._on_load_filter)
+        self.btn_criteria.clicked.connect(self.criteria_requested.emit)
         self.well_list.itemSelectionChanged.connect(self._on_selection)
 
     # ── Public ───────────────────────────────────────────────────────────────

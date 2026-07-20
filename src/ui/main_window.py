@@ -184,6 +184,7 @@ class MainWindow(QMainWindow):
         self.method_panel.autofit_all_requested.connect(self._on_autofit_all)
         self.method_panel.edit_toggled.connect(self._on_edit_toggle)
         self.data_panel.filter_applied.connect(self._on_filter_applied)
+        self.data_panel.criteria_requested.connect(self._on_well_criteria)
         self.data_panel.scenario_changed.connect(self._on_scenario_combo_changed)
         self.data_panel.chk_active_wells.stateChanged.connect(self._on_plot_data)
         self.method_panel.cmb_dca_mode.currentIndexChanged.connect(self._on_plot_data)
@@ -457,6 +458,21 @@ class MainWindow(QMainWindow):
             else:
                 msg += f", {n_missing} не найдено"
         self.status.showMessage(msg, 8000)
+
+    def _on_well_criteria(self) -> None:
+        """Open the well-selection-by-criteria dialog."""
+        if self.df is None:
+            self.status.showMessage("Данные не загружены", 3000)
+            return
+        from src.ui.well_criteria_dialog import WellCriteriaDialog
+        dlg = WellCriteriaDialog(self.df, parent=self)
+        if dlg.exec() != WellCriteriaDialog.DialogCode.Accepted:
+            return
+        matched = dlg.matched_wells()
+        self.data_panel.apply_well_filter(matched)
+        self.status.showMessage(
+            f"Критерий: выбрано {len(matched)} скважин", 5000
+        )
 
     def _on_wells_changed(self, wells: list[str]) -> None:
         self._selected_wells = wells
