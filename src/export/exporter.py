@@ -72,6 +72,9 @@ def _serialise_well_analysis_scenarios(well_analysis_scenarios: list) -> list:
             "name":       sc.name,
             "wells":      sc.wells,
             "phase":      getattr(sc, "phase", "oil"),
+            "mode":       getattr(sc, "mode", "production"),
+            "min_rate":   getattr(sc, "min_rate", 1.0),
+            "min_days":   getattr(sc, "min_days", 1.0),
             "excluded":   sc.excluded,   # [[well, iso_date], ...]
             "pct_months": sc.pct_months,
             "pct_data":   sc.pct_data,   # {"10": [...], "50": [...], "90": [...]}
@@ -90,6 +93,9 @@ def _deserialise_well_analysis_scenarios(raw: list) -> list:
             name       = entry.get("name", f"Анализ {i + 1}"),
             wells      = entry.get("wells", []),
             phase      = entry.get("phase", "oil"),
+            mode       = entry.get("mode", "production"),
+            min_rate   = entry.get("min_rate", 1.0),
+            min_days   = entry.get("min_days", 1.0),
             excluded   = entry.get("excluded", []),
             pct_months = entry.get("pct_months", []),
             pct_data   = entry.get("pct_data", {}),

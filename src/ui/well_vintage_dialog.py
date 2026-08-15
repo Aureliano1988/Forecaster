@@ -26,13 +26,15 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QRadioButton,
     QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
 from src.data.models import (
-    COL_DATE, COL_GAS, COL_OIL, COL_WELL, COL_WORK_TYPE, WORK_TYPE_OIL,
+    COL_DATE, COL_GAS, COL_LIQUID, COL_OIL, COL_WATER, COL_WELL,
+    COL_WORK_TYPE, WORK_TYPE_OIL,
 )
 
 # ── Colour palette ─────────────────────────────────────────────────────────────
@@ -118,7 +120,20 @@ class WellVintageDialog(QDialog):
         btn_filter.clicked.connect(self._load_filter)
         gw_lay.addWidget(btn_filter)
 
+        btn_criteria = QPushButton("Выбрать по критерию\u2026")
+        btn_criteria.clicked.connect(self._on_criteria)
+        gw_lay.addWidget(btn_criteria)
+
         left_lay.addWidget(grp_wells)
+
+        # Display mode
+        self._rb_production = QRadioButton("Добыча")
+        self._rb_well_count = QRadioButton("Кол-во скважин")
+        self._rb_qo_wor = QRadioButton("Qo vs ВНФ")
+        self._rb_production.setChecked(True)
+        left_lay.addWidget(self._rb_production)
+        left_lay.addWidget(self._rb_well_count)
+        left_lay.addWidget(self._rb_qo_wor)
 
         left_lay.addStretch()
 
@@ -156,6 +171,9 @@ class WellVintageDialog(QDialog):
         # ── Connections ───────────────────────────────────────────────────────────────
         self._lst.itemSelectionChanged.connect(self._draw)
         self._cmb_phase.currentIndexChanged.connect(self._on_phase_changed)
+        self._rb_production.toggled.connect(self._draw)
+        self._rb_well_count.toggled.connect(self._draw)
+        self._rb_qo_wor.toggled.connect(self._draw)
 
     # ── Cache ─────────────────────────────────────────────────────────────────
 
@@ -207,7 +225,25 @@ class WellVintageDialog(QDialog):
         self._wells = new_wells
         self._draw()
 
-    # ── Filter from file ───────────────────────────────────────────────────────
+    # ── Criteria selection ─────────────────────────────────────────────────
+
+    def _on_criteria(self) -> None:
+        from src.ui.well_criteria_dialog import WellCriteriaDialog
+        dlg = WellCriteriaDialog(self._df, parent=self)
+        if dlg.exec() != WellCriteriaDialog.DialogCode.Accepted:
+            return
+        matched = dlg.matched_wells()
+        name_set = {n.lower() for n in matched}
+        self._lst.blockSignals(True)
+        self._lst.clearSelection()
+        for i in range(self._lst.count()):
+            item = self._lst.item(i)
+            if item and item.text().lower() in name_set:
+                item.setSelected(True)
+        self._lst.blockSignals(False)
+        self._lst.itemSelectionChanged.emit()
+
+    # ── Filter from file ─────────────────────────────────────────────────────
 
     def _load_filter(self) -> None:
         from PySide6.QtWidgets import QFileDialog
@@ -319,29 +355,36 @@ class WellVintageDialog(QDialog):
             self._canvas.draw_idle()
             return
 
+        if self._rb_well_count.isChecked():
+            self._draw_well_count(ax, selected)
+        elif self._rb_qo_wor.isChecked():
+            self._draw_qo_wor(ax, selected)
+        else:
+            self._draw_production(ax, selected)
+
+        ax.grid(True, alpha=0.3)
+        self._canvas.draw_idle()
+
+    def _draw_production(self, ax, selected: list[str]) -> None:
+        """Stacked area chart of production by vintage year."""
         result = self._build_vintage_data(selected)
         if result is None:
             ax.set_title("Нет данных")
-            self._canvas.draw_idle()
             return
 
         dates, arrays = result
-        years = sorted(arrays.keys())   # oldest → bottom of stack
+        years = sorted(arrays.keys())
 
-        # Convert dates to matplotlib ordinals for stackplot
         date_nums = mdates.date2num(dates)
         layers = [arrays[yr] for yr in years]
         colors = [_COLORS[i % len(_COLORS)] for i in range(len(years))]
 
         ax.stackplot(
-            date_nums,
-            layers,
+            date_nums, layers,
             labels=[str(yr) for yr in years],
-            colors=colors,
-            alpha=0.85,
+            colors=colors, alpha=0.85,
         )
 
-        # X-axis date formatting
         ax.xaxis_date()
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
         ax.xaxis.set_major_locator(mdates.YearLocator())
@@ -358,10 +401,85 @@ class WellVintageDialog(QDialog):
         from src.ui.legend_helper import fit_legend
         fit_legend(ax, loc="upper right")
 
-        ax.grid(True, alpha=0.3)
-        self._canvas.draw_idle()
+    def _draw_well_count(self, ax, selected: list[str]) -> None:
+        """Bar chart: number of wells per vintage year."""
+        vintage = {
+            w: self._vintage_cache[w]
+            for w in selected if w in self._vintage_cache
+        }
+        if not vintage:
+            ax.set_title("Нет данных")
+            return
 
-    # ── Export ─────────────────────────────────────────────────────────────────
+        from collections import Counter
+        counts = Counter(vintage.values())
+        years = sorted(counts.keys())
+        vals = [counts[yr] for yr in years]
+
+        colors = [_COLORS[i % len(_COLORS)] for i in range(len(years))]
+        ax.bar([str(yr) for yr in years], vals, color=colors, edgecolor="white", linewidth=0.5)
+        ax.set_xlabel("Год ввода")
+        ax.set_ylabel("Кол-во скважин")
+        ax.set_title(f"Кол-во скважин по годам ввода ({sum(vals)} скв.)")
+        for lbl in ax.get_xticklabels():
+            lbl.set_rotation(45)
+            lbl.set_ha("right")
+            lbl.set_fontsize(8)
+        from matplotlib.ticker import MaxNLocator
+        ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+
+    def _draw_qo_wor(self, ax, selected: list[str]) -> None:
+        """Scatter/line: cumulative oil (X) vs WOR (Y) per vintage group."""
+        prod_col = COL_GAS if self._phase == "gas" else COL_OIL
+        vintage: dict[str, int] = {
+            w: self._vintage_cache[w]
+            for w in selected if w in self._vintage_cache
+        }
+        if not vintage:
+            ax.set_title("Нет данных")
+            return
+
+        sub = self._df_prod[self._df_prod[COL_WELL].isin(list(vintage.keys()))].copy()
+        if COL_DATE not in sub.columns or prod_col not in sub.columns:
+            ax.set_title("Нет данных")
+            return
+
+        # Need water column for WOR
+        water_col = COL_WATER if COL_WATER in sub.columns else None
+        if water_col is None:
+            ax.set_title("Нет данных по воде")
+            return
+
+        sub["_vintage"] = sub[COL_WELL].map(vintage).astype(int)
+
+        # Aggregate oil and water per vintage per date
+        agg = sub.groupby([COL_DATE, "_vintage"]).agg(
+            {prod_col: "sum", water_col: "sum"}
+        ).sort_index()
+
+        years_sorted = sorted(set(vintage.values()))
+        for ki, yr in enumerate(years_sorted):
+            if yr not in agg.index.get_level_values(1):
+                continue
+            grp = agg.xs(yr, level="_vintage")
+            qo_cum = np.cumsum(grp[prod_col].values.astype(float))
+            qw = grp[water_col].values.astype(float)
+            qo_m = grp[prod_col].values.astype(float)
+            wor = np.divide(qw, qo_m, out=np.zeros_like(qo_m), where=qo_m > 0)
+            color = _COLORS[ki % len(_COLORS)]
+            ax.plot(qo_cum, wor, color=color, linewidth=1.0,
+                    label=str(yr), alpha=0.85)
+
+        ax.set_xlabel("Нак. нефть, т")
+        ax.set_ylabel("ВНФ")
+        n_wells = len(vintage)
+        ax.set_title(f"Qo vs ВНФ по годам ввода ({n_wells} скв., {len(years_sorted)} групп)")
+        ax.set_yscale("log")
+
+        from src.ui.legend_helper import fit_legend
+        fit_legend(ax, loc="upper left")
+
+    # ── Export ─────────────────────────────────────────────────────────────
 
     def _copy_data(self) -> None:
         """Copy tab-separated table: Date | Year1 | Year2 | … | Total."""

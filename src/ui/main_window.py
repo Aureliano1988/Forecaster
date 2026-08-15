@@ -170,6 +170,7 @@ class MainWindow(QMainWindow):
         wells_menu.addAction(_act("Приведённая добыча по скважинам…", self._on_well_alignment, "Ctrl+A"))
         wells_menu.addSeparator()
         wells_menu.addAction(_act("Группировка скважин по годам ввода…", self._on_well_vintage))
+        wells_menu.addAction(_act("Распределение НДН…", self._on_prod_distribution))
         wells_menu.addAction(_act("Графики Чена…", self._on_chan_plot))
 
         # ── Connections ──────────────────────────────────────────────────────
@@ -1165,6 +1166,76 @@ class MainWindow(QMainWindow):
             qo_hist_last=Qo_last,
         )
         self._update_window_title()
+        # Defer heavy refresh while user is interactively dragging the trend
+        if not self._edit_trend_active:
+            self._refresh_forecast_plots()
+
+    # ── Forecast plots live refresh ─────────────────────────────────────
+
+    def _refresh_forecast_plots(self) -> None:
+        """Push updated data to the open forecast-plots dialog (if any)."""
+        dlg = getattr(self, "_forecast_plots_dlg", None)
+        if dlg is None or not dlg.isVisible():
+            return
+        hist_data: dict | None = None
+        qi_hist_last: float = 0.0
+        qi_const: float = 0.0
+        sub = self._get_sub()
+        if sub is not None and self.df is not None:
+            prod = self._get_displacement_data(sub)
+            if prod is not None:
+                Qo, Ql, _Qw, qo, ql, qw = prod
+                hist_data = {
+                    "qo": qo, "ql": ql, "Qo": Qo, "Ql": Ql,
+                    "WOR": np.divide(qw, qo, out=np.zeros_like(qo), where=qo > 0),
+                }
+                eff_s = self._sc_stoiip()
+                eff_h = self._sc_hcpv()
+                if eff_s > 0:
+                    hist_data["RF"] = Qo / eff_s
+                n_prod = len(qo)
+                if COL_WORK_TYPE in self.df.columns and COL_WATER in self.df.columns:
+                    from src.data.models import WORK_TYPE_INJ
+                    inj_df = self.df[
+                        (self.df[COL_WELL].isin(self._selected_wells)) &
+                        (self.df[COL_WORK_TYPE] == WORK_TYPE_INJ)
+                    ]
+                    if len(inj_df) > 0:
+                        pd_ = sub.groupby(COL_DATE)[COL_OIL].sum().sort_index().index
+                        im = inj_df.groupby(COL_DATE)[COL_WATER].sum().sort_index()
+                        ia = im.reindex(pd_, fill_value=0.0)
+                        qi_arr = ia.values.astype(float)
+                        qi_cum = np.cumsum(qi_arr)
+                        qi_hist_last = float(qi_cum[-1]) if len(qi_cum) else 0.0
+                        qi_const, _ = self._avg_last(qi_arr, self.method_panel.get_n_avg())
+                        hist_data["qi_inj"] = qi_arr
+                        hist_data["Qi_inj"] = qi_cum
+                        if eff_h > 0 and len(qi_cum) > 0:
+                            hist_data["HCPVI"] = qi_cum / eff_h
+                if "HCPVI" not in hist_data and eff_h > 0 and n_prod > 0:
+                    hist_data["qi_inj"] = np.zeros(n_prod, dtype=float)
+                    hist_data["Qi_inj"] = np.zeros(n_prod, dtype=float)
+                    hist_data["HCPVI"] = np.zeros(n_prod, dtype=float)
+                if "qi_inj" in hist_data and n_prod > 0:
+                    qi_h = hist_data["qi_inj"].astype(float)
+                    ql_h = hist_data["ql"].astype(float) if not isinstance(hist_data["ql"], np.ndarray) else hist_data["ql"]
+                    Qi_h = hist_data["Qi_inj"].astype(float) if not isinstance(hist_data["Qi_inj"], np.ndarray) else hist_data["Qi_inj"]
+                    Ql_h = hist_data["Ql"].astype(float) if not isinstance(hist_data["Ql"], np.ndarray) else hist_data["Ql"]
+                    hist_data["comp_cur"] = np.divide(qi_h, ql_h, out=np.zeros(n_prod, dtype=float), where=ql_h > 0)
+                    hist_data["comp_tot"] = np.divide(Qi_h, Ql_h, out=np.zeros(n_prod, dtype=float), where=Ql_h > 0)
+        self._commit_active_scenario()
+        sc_hist = [self._compute_scenario_hist(sc) for sc in self._scenarios]
+        dlg.refresh(
+            self._saved_results,
+            hist_data=hist_data,
+            stoiip=self._sc_stoiip(),
+            hcpv=self._sc_hcpv(),
+            qi_hist_last=qi_hist_last,
+            qi_const=qi_const,
+            n_avg=self.method_panel.get_n_avg(),
+            scenarios=self._scenarios,
+            scenarios_hist=sc_hist,
+        )
 
     # ── Export plot ───────────────────────────────────────────────────────
 
@@ -1601,6 +1672,8 @@ class MainWindow(QMainWindow):
         if not self._edit_trend_active:
             return
         self._edit_trend_active = False
+        # Deferred refresh: push the final forecast state to the plots dialog
+        self._refresh_forecast_plots()
         self._edit_pressed = None
 
         for h in self._edit_handles:
@@ -2010,18 +2083,27 @@ class MainWindow(QMainWindow):
             self.status.showMessage("Данные не загружены", 3000)
             return
         from src.ui.well_alignment_dialog import WellAlignmentDialog
-        dlg = WellAlignmentDialog(
+        self._well_alignment_dlg = WellAlignmentDialog(
             self.df,
             well_analysis_scenarios=self._well_analysis_scenarios,
             parent=self,
         )
-        dlg.finished.connect(lambda: self._on_well_alignment_closed(dlg))
-        dlg.show()
-        dlg.raise_()
+        self._well_alignment_dlg.finished.connect(self._on_well_alignment_closed)
+        self._well_alignment_dlg.show()
+        self._well_alignment_dlg.raise_()
 
-    def _on_well_alignment_closed(self, dlg) -> None:
+    def _on_well_alignment_closed(self) -> None:
         """Retrieve updated scenarios when the alignment dialog closes."""
-        self._well_analysis_scenarios = dlg.result_scenarios()
+        dlg = getattr(self, "_well_alignment_dlg", None)
+        if dlg is not None:
+            self._well_analysis_scenarios = dlg.result_scenarios()
+            self._well_alignment_dlg = None
+
+    def _sync_well_analysis_scenarios(self) -> None:
+        """Grab live scenarios from the open well-alignment dialog (if any)."""
+        dlg = getattr(self, "_well_alignment_dlg", None)
+        if dlg is not None and dlg.isVisible():
+            self._well_analysis_scenarios = dlg.result_scenarios()
 
     def _on_well_vintage(self) -> None:
         """Open the vintage year grouping (stacked area) window."""
@@ -2030,6 +2112,15 @@ class MainWindow(QMainWindow):
             return
         from src.ui.well_vintage_dialog import WellVintageDialog
         dlg = WellVintageDialog(self.df, parent=self)
+        dlg.exec()
+
+    def _on_prod_distribution(self) -> None:
+        """Open the total oil production distribution histogram."""
+        if self.df is None:
+            self.status.showMessage("Данные не загружены", 3000)
+            return
+        from src.ui.production_distribution_dialog import ProductionDistributionDialog
+        dlg = ProductionDistributionDialog(self.df, parent=self)
         dlg.exec()
 
     def _on_chan_plot(self) -> None:
@@ -2261,7 +2352,7 @@ class MainWindow(QMainWindow):
         scenarios_hist = [self._compute_scenario_hist(sc) for sc in self._scenarios]
 
         from src.ui.forecast_plots_dialog import ForecastPlotsDialog
-        dlg = ForecastPlotsDialog(
+        self._forecast_plots_dlg = ForecastPlotsDialog(
             self._saved_results,
             project_name=self._project_name,
             hist_data=hist_data,
@@ -2274,7 +2365,11 @@ class MainWindow(QMainWindow):
             scenarios_hist=scenarios_hist,
             parent=self,
         )
-        dlg.exec()
+        self._forecast_plots_dlg.finished.connect(
+            lambda: setattr(self, "_forecast_plots_dlg", None)
+        )
+        self._forecast_plots_dlg.show()
+        self._forecast_plots_dlg.raise_()
 
     def _on_object_info(self) -> None:
         """Open the object info card dashboard."""
@@ -2527,6 +2622,8 @@ class MainWindow(QMainWindow):
         from src.export.exporter import save_fcst_file
         # Commit working buffers into the active scenario before writing
         self._commit_active_scenario()
+        # Grab latest well-analysis scenarios from the open dialog (if any)
+        self._sync_well_analysis_scenarios()
         # Ensure there is at least one scenario to save
         if not self._scenarios:
             self._scenarios = [
@@ -2548,6 +2645,7 @@ class MainWindow(QMainWindow):
                 col_mapping=self._col_mapping,
             )
             self._act_project_info.setEnabled(True)
+            self._refresh_forecast_plots()
             self.status.showMessage(f"Проект сохранён: {path}", 5000)
             return True
         except Exception as exc:

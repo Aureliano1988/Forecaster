@@ -399,6 +399,75 @@ class ForecastPlotsDialog(QDialog):
 
         self._draw()
 
+    # ── Live refresh (called from MainWindow) ──────────────────────────
+
+    def refresh(
+        self,
+        saved_results: dict,
+        hist_data: dict | None = None,
+        stoiip: float = 0.0,
+        hcpv: float = 0.0,
+        qi_hist_last: float = 0.0,
+        qi_const: float = 0.0,
+        n_avg: int = 3,
+        scenarios=None,
+        scenarios_hist=None,
+    ) -> None:
+        """Update data from the main window and redraw."""
+        self._stoiip = stoiip
+        self._hcpv = hcpv
+        self._qi_hist_last = qi_hist_last
+        self._qi_const = qi_const
+        self._n_avg = n_avg
+        self._hist = hist_data
+        self._scenarios = list(scenarios) if scenarios else []
+        self._scenarios_hist = list(scenarios_hist) if scenarios_hist else []
+
+        new_data = {
+            k: v for k, v in saved_results.items()
+            if v.monthly is not None and v.monthly.duration > 0
+        }
+        old_keys = set(self._data.keys())
+        new_keys = set(new_data.keys())
+        self._data = new_data
+
+        if new_keys != old_keys:
+            prev_sel = {
+                item.data(Qt.ItemDataRole.UserRole)
+                for item in self._lst.selectedItems()
+            }
+            self._lst.blockSignals(True)
+            self._lst.clear()
+            for key in self._data:
+                family, mname = key.split("|", 1)
+                short = _FAMILY_SHORT.get(family, family[:3])
+                item = QListWidgetItem(f"{mname}  [{short}]")
+                item.setData(Qt.ItemDataRole.UserRole, key)
+                self._lst.addItem(item)
+                if key in prev_sel:
+                    item.setSelected(True)
+            self._lst.blockSignals(False)
+
+        mw = self.parent()
+        if mw is not None and hasattr(mw, "df") and mw.df is not None:
+            from src.data.models import COL_DATE as _CD, COL_OIL as _CO, COL_WELL as _CW
+            from src.data.models import COL_WORK_TYPE as _CT, WORK_TYPE_OIL as _WO
+            sub = mw.df
+            if _CT in sub.columns:
+                sub = sub[sub[_CT] == _WO]
+            if hasattr(mw, "_selected_wells") and mw._selected_wells:
+                sub = sub[sub[_CW].isin(mw._selected_wells)]
+            if _CD in sub.columns and len(sub) > 0:
+                dates = sub.groupby(_CD)[_CO].sum().sort_index()
+                dates = dates[dates > 0]
+                if len(dates) > 0:
+                    self._last_hist_date = pd.Timestamp(dates.index[-1])
+                    self._n_hist = len(dates)
+
+        self._pct_methods = None
+        self._show_pct = False
+        self._draw()
+
     # ── Averaging helper (matches MainWindow._avg_last) ───────────────
 
     @staticmethod

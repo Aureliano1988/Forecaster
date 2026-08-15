@@ -31,8 +31,11 @@ from src.data.models import (
 
 # (display_name, internal_key)
 _CRITERIA = [
-    ("Год начала добычи",  "first_year"),
-    ("Средний КЭ",         "avg_ke"),
+    ("Год начала добычи",              "first_year"),
+    ("Средний КЭ",                     "avg_ke"),
+    ("Месяцев добычи",                "prod_months"),
+    ("Добыча каждый год",            "prod_every_yr"),
+    ("КЭ > 0.95 каждый год",          "ke95_every_yr"),
 ]
 
 _COMPARISONS = [
@@ -222,6 +225,14 @@ class WellCriteriaDialog(QDialog):
                 else:
                     metrics[w]["first_year"] = float("nan")
 
+        if "prod_months" in needed_keys:
+            n_months_per_well = well_groups[COL_DATE].nunique()
+            for w in wells:
+                if w in n_months_per_well.index:
+                    metrics[w]["prod_months"] = float(n_months_per_well[w])
+                else:
+                    metrics[w]["prod_months"] = 0.0
+
         if "avg_ke" in needed_keys:
             if COL_HOURS_WORK in sub.columns:
                 total_hours = well_groups[COL_HOURS_WORK].sum()
@@ -239,11 +250,79 @@ class WellCriteriaDialog(QDialog):
                 for w in wells:
                     metrics[w]["avg_ke"] = float("nan")
 
+        # Per-well annual oil production (year → total oil)
+        well_annual: dict[str, dict[int, float]] = {}
+        need_annual = "prod_every_yr" in needed_keys
+        if need_annual and COL_OIL in sub.columns:
+            sub_c = sub.copy()
+            sub_c["_year"] = pd.to_datetime(sub_c[COL_DATE]).dt.year
+            annual = sub_c.groupby([COL_WELL, "_year"])[COL_OIL].sum()
+            for w in wells:
+                if w in annual.index.get_level_values(0):
+                    well_annual[w] = {
+                        int(yr): float(v)
+                        for yr, v in annual.loc[w].items()
+                    }
+                else:
+                    well_annual[w] = {}
+
+        # Per-well annual efficiency factor (year → KE)
+        well_annual_ke: dict[str, dict[int, float]] = {}
+        need_ke_annual = "ke95_every_yr" in needed_keys
+        if need_ke_annual and COL_HOURS_WORK in sub.columns:
+            sub_c = sub.copy() if not need_annual else sub_c  # reuse if already copied
+            if "_year" not in sub_c.columns:
+                sub_c["_year"] = pd.to_datetime(sub_c[COL_DATE]).dt.year
+            ann_hours = sub_c.groupby([COL_WELL, "_year"])[COL_HOURS_WORK].sum()
+            ann_months = sub_c.groupby([COL_WELL, "_year"])[COL_DATE].nunique()
+            for w in wells:
+                ke_dict: dict[int, float] = {}
+                if w in ann_hours.index.get_level_values(0):
+                    for yr in ann_hours.loc[w].index:
+                        nm = float(ann_months.loc[w].loc[yr]) if yr in ann_months.loc[w].index else 0.0
+                        if nm > 0:
+                            ke_dict[int(yr)] = float(ann_hours.loc[w].loc[yr]) / (nm * 24.0 * 30.4375)
+                        else:
+                            ke_dict[int(yr)] = 0.0
+                well_annual_ke[w] = ke_dict
+
         # Apply criteria (AND logic)
         matched: list[str] = []
         for w in wells:
             ok = True
             for key, cmp, val in criteria:
+                # Production every year: uses < (before year) or > (from year)
+                if key == "prod_every_yr":
+                    yr_thr = int(val)
+                    wa = well_annual.get(w, {})
+                    if cmp == "lt":
+                        check_years = [y for y in wa if y < yr_thr]
+                    else:  # gt or eq → treat as ≥
+                        check_years = [y for y in wa if y >= yr_thr]
+                    if not check_years:
+                        ok = False
+                        break
+                    if not all(wa.get(y, 0.0) > 0 for y in check_years):
+                        ok = False
+                        break
+                    continue
+
+                # KE > 0.95 every year: uses < (before year) or > (from year)
+                if key == "ke95_every_yr":
+                    yr_thr = int(val)
+                    wke = well_annual_ke.get(w, {})
+                    if cmp == "lt":
+                        check_years = [y for y in wke if y < yr_thr]
+                    else:
+                        check_years = [y for y in wke if y >= yr_thr]
+                    if not check_years:
+                        ok = False
+                        break
+                    if not all(wke.get(y, 0.0) > 0.95 for y in check_years):
+                        ok = False
+                        break
+                    continue
+
                 wv = metrics[w].get(key, float("nan"))
                 if np.isnan(wv):
                     ok = False
