@@ -16,6 +16,7 @@ from matplotlib.figure import Figure
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QDoubleSpinBox,
     QFileDialog,
@@ -32,32 +33,44 @@ from PySide6.QtWidgets import (
 )
 
 from src.data.models import (
-    COL_DATE, COL_OIL, COL_WELL, COL_WORK_TYPE, WORK_TYPE_OIL,
+    COL_DATE, COL_GAS, COL_HOURS_WORK, COL_LIQUID, COL_OIL, COL_WATER,
+    COL_WELL, COL_WORK_TYPE, WORK_TYPE_OIL,
 )
+
+# (display_name, internal_key, x_label, unit)
+_DIST_PARAMS = [
+    ("Нак. нефть",            "total_oil",     "Нак. нефть, т"),
+    ("Нач. дебит нефти",     "init_oil_rate", "Нач. дебит нефти, т/сут"),
+    ("Макс. дебит нефти",    "max_oil_rate",  "Макс. дебит нефти, т/сут"),
+    ("Нач. дебит жидкости",   "init_liq_rate", "Нач. дебит жидк., т/сут"),
+    ("Макс. дебит жидкости",  "max_liq_rate",  "Макс. дебит жидк., т/сут"),
+    ("Нач. обводнённость",     "init_wcut",     "Нач. обводнённость"),
+]
 
 
 class ProductionDistributionDialog(QDialog):
-    """Histogram of total oil production per well."""
+    """Histogram of per-well metrics distribution."""
 
     def __init__(self, df: pd.DataFrame, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Распределение НДН")
+        self.setWindowTitle("Распределение")
         self.resize(1100, 650)
         self._df = df
 
-        # Pre-compute per-well cumulative oil
-        self._well_qo: dict[str, float] = {}
+        # Per-well metrics: {param_key: {well: value}}
+        self._well_metrics: dict[str, dict[str, float]] = {}
         self._build_cache()
 
         self._build_ui()
 
-        # Populate well list
-        for w in sorted(self._well_qo.keys()):
+        # Populate well list from wells that have at least total_oil > 0
+        all_wells = sorted(self._well_metrics.get("total_oil", {}).keys())
+        for w in all_wells:
             self._lst.addItem(QListWidgetItem(w))
 
         self._draw()
 
-    # ── Cache ────────────────────────────────────────────────────────────────
+    # ── Cache ──────────────────────────────────────────────────────────────
 
     def _build_cache(self) -> None:
         sub = self._df
@@ -65,11 +78,76 @@ class ProductionDistributionDialog(QDialog):
             sub = sub[sub[COL_WORK_TYPE] == WORK_TYPE_OIL]
         if COL_WELL not in sub.columns or COL_OIL not in sub.columns:
             return
-        totals = sub.groupby(COL_WELL)[COL_OIL].sum()
-        self._well_qo = {
-            str(w): float(v) for w, v in totals.items()
-            if pd.notna(w) and v > 0
+
+        grp = sub.groupby(COL_WELL)
+
+        # Total oil
+        totals = grp[COL_OIL].sum()
+        wells = [str(w) for w in totals.index if pd.notna(w) and totals[w] > 0]
+        self._well_metrics["total_oil"] = {
+            w: float(totals[w]) for w in wells
         }
+
+        # Compute liquid per row if not present
+        has_water = COL_WATER in sub.columns
+        has_liquid = COL_LIQUID in sub.columns
+        has_gas = COL_GAS in sub.columns
+        has_hours = COL_HOURS_WORK in sub.columns
+
+        # Per-well first-month and max-month rates
+        init_oil: dict[str, float] = {}
+        max_oil: dict[str, float] = {}
+        init_liq: dict[str, float] = {}
+        max_liq: dict[str, float] = {}
+        init_wcut: dict[str, float] = {}
+
+        for w in wells:
+            try:
+                ws = grp.get_group(w).sort_values(COL_DATE)
+            except KeyError:
+                continue
+            oil_m = ws[COL_OIL].values.astype(float)
+            hours_m = ws[COL_HOURS_WORK].values.astype(float) if has_hours else np.full(len(ws), 730.5)
+            days = hours_m / 24.0
+            days = np.where(days > 0, days, np.nan)
+
+            oil_rate = oil_m / days  # t/day
+            valid_oil = np.where(np.isfinite(oil_rate) & (oil_rate > 0), oil_rate, np.nan)
+
+            # First valid rate
+            first_idx = np.nanargmin(np.where(np.isfinite(valid_oil), np.arange(len(valid_oil)), np.inf))
+            if np.isfinite(valid_oil[first_idx]):
+                init_oil[w] = float(valid_oil[first_idx])
+            max_v = np.nanmax(valid_oil) if np.any(np.isfinite(valid_oil)) else np.nan
+            if np.isfinite(max_v):
+                max_oil[w] = float(max_v)
+
+            # Liquid rate
+            if has_liquid:
+                liq_m = ws[COL_LIQUID].values.astype(float)
+            elif has_water:
+                liq_m = oil_m + ws[COL_WATER].values.astype(float)
+            else:
+                liq_m = oil_m
+            liq_rate = liq_m / days
+            valid_liq = np.where(np.isfinite(liq_rate) & (liq_rate > 0), liq_rate, np.nan)
+            if np.isfinite(valid_liq[first_idx]):
+                init_liq[w] = float(valid_liq[first_idx])
+            max_lv = np.nanmax(valid_liq) if np.any(np.isfinite(valid_liq)) else np.nan
+            if np.isfinite(max_lv):
+                max_liq[w] = float(max_lv)
+
+            # Initial watercut
+            if has_water:
+                water_m = ws[COL_WATER].values.astype(float)
+                if liq_m[first_idx] > 0:
+                    init_wcut[w] = float(water_m[first_idx] / liq_m[first_idx])
+
+        self._well_metrics["init_oil_rate"] = init_oil
+        self._well_metrics["max_oil_rate"] = max_oil
+        self._well_metrics["init_liq_rate"] = init_liq
+        self._well_metrics["max_liq_rate"] = max_liq
+        self._well_metrics["init_wcut"] = init_wcut
 
     # ── UI ────────────────────────────────────────────────────────────────────
 
@@ -115,6 +193,15 @@ class ProductionDistributionDialog(QDialog):
 
         left_lay.addWidget(grp_wells)
 
+        # Parameter selector
+        param_row = QHBoxLayout()
+        param_row.addWidget(QLabel("Параметр:"))
+        self._cmb_param = QComboBox()
+        for disp, key, _ in _DIST_PARAMS:
+            self._cmb_param.addItem(disp, key)
+        param_row.addWidget(self._cmb_param, 1)
+        left_lay.addLayout(param_row)
+
         # Bins
         bins_row = QHBoxLayout()
         bins_row.addWidget(QLabel("Кол-во бинов:"))
@@ -135,7 +222,7 @@ class ProductionDistributionDialog(QDialog):
 
         # Min total production
         min_row = QHBoxLayout()
-        min_row.addWidget(QLabel("Мин. НДН, т:"))
+        min_row.addWidget(QLabel("Мин. значение:"))
         self._spn_min = QDoubleSpinBox()
         self._spn_min.setRange(0.0, 1e9)
         self._spn_min.setDecimals(0)
@@ -179,8 +266,9 @@ class ProductionDistributionDialog(QDialog):
         btns.addStretch()
         right_lay.addLayout(btns)
 
-        # ── Connections ──────────────────────────────────────────────────────
+        # ── Connections ──────────────────────────────────────────────────────────
         self._lst.itemSelectionChanged.connect(self._draw)
+        self._cmb_param.currentIndexChanged.connect(self._draw)
         self._spn_bins.valueChanged.connect(self._draw)
         self._chk_log.stateChanged.connect(self._draw)
         self._spn_min.valueChanged.connect(self._draw)
@@ -190,7 +278,8 @@ class ProductionDistributionDialog(QDialog):
 
     def _on_criteria(self) -> None:
         from src.ui.well_criteria_dialog import WellCriteriaDialog
-        dlg = WellCriteriaDialog(self._df, parent=self)
+        cur = [item.text() for item in self._lst.selectedItems()]
+        dlg = WellCriteriaDialog(self._df, current_wells=cur, parent=self)
         if dlg.exec() != WellCriteriaDialog.DialogCode.Accepted:
             return
         matched = dlg.matched_wells()
@@ -243,10 +332,20 @@ class ProductionDistributionDialog(QDialog):
         ax = self._fig.add_subplot(111)
 
         selected = [item.text() for item in self._lst.selectedItems()]
-        min_qo = self._spn_min.value()
+        param_key = self._cmb_param.currentData()
+        param_label = _DIST_PARAMS[self._cmb_param.currentIndex()][2]
+        metrics = self._well_metrics.get(param_key, {})
+        min_val = self._spn_min.value()
+
+        # For ratio parameters (watercut 0-1), skip the min-value filter
+        # but still exclude zeros for initial rates and watercut
+        skip_min = param_key in ("init_wcut",)
+        exclude_zero = param_key in ("init_oil_rate", "init_liq_rate", "init_wcut")
         values = np.array([
-            self._well_qo[w] for w in selected
-            if w in self._well_qo and self._well_qo[w] > min_qo
+            metrics[w] for w in selected
+            if w in metrics
+            and (skip_min or metrics[w] > min_val)
+            and (not exclude_zero or metrics[w] > 0)
         ])
 
         if len(values) == 0:
@@ -256,32 +355,30 @@ class ProductionDistributionDialog(QDialog):
 
         n_bins = self._spn_bins.value()
         use_log = self._chk_log.isChecked()
+        x_lbl = param_label
 
         if use_log:
             log_vals = np.log10(np.clip(values, 1e-6, None))
             counts, bin_edges = np.histogram(log_vals, bins=n_bins)
-            # Convert log edges back to real Qo for display
             real_edges = 10.0 ** bin_edges
             widths = np.diff(bin_edges)
             ax.bar(bin_edges[:-1], counts, width=widths, align="edge",
                    color="steelblue", edgecolor="white", linewidth=0.5)
-            # X-axis: show real Qo values at log positions
             tick_pos = bin_edges
-            tick_labels = [f"{v:,.0f}" for v in real_edges]
-            # Show every other tick if too many
+            tick_labels = [f"{v:,.1f}" if max(real_edges) < 100 else f"{v:,.0f}" for v in real_edges]
             if len(tick_pos) > 12:
                 step = max(1, len(tick_pos) // 8)
                 tick_pos = tick_pos[::step]
                 tick_labels = tick_labels[::step]
             ax.set_xticks(tick_pos)
             ax.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=7)
-            ax.set_xlabel("Нак. нефть, т (log-шкала)")
+            ax.set_xlabel(f"{x_lbl} (log-шкала)")
         else:
             counts, bin_edges, _patches = ax.hist(
                 values, bins=n_bins,
                 color="steelblue", edgecolor="white", linewidth=0.5,
             )
-            ax.set_xlabel("Нак. нефть, т")
+            ax.set_xlabel(x_lbl)
             ax.ticklabel_format(axis="x", style="plain")
             for lbl in ax.get_xticklabels():
                 lbl.set_rotation(45)
@@ -302,7 +399,7 @@ class ProductionDistributionDialog(QDialog):
         )
 
         ax.set_ylabel("Кол-во скважин")
-        ax.set_title(f"Распределение НДН ({len(values)} скв.)")
+        ax.set_title(f"Распределение: {param_label} ({len(values)} скв.)")
         ax.grid(True, axis="y", alpha=0.3)
 
         # Cumulative curve on Y2

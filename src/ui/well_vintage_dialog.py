@@ -229,7 +229,8 @@ class WellVintageDialog(QDialog):
 
     def _on_criteria(self) -> None:
         from src.ui.well_criteria_dialog import WellCriteriaDialog
-        dlg = WellCriteriaDialog(self._df, parent=self)
+        cur = [item.text() for item in self._lst.selectedItems()]
+        dlg = WellCriteriaDialog(self._df, current_wells=cur, parent=self)
         if dlg.exec() != WellCriteriaDialog.DialogCode.Accepted:
             return
         matched = dlg.matched_wells()
@@ -429,7 +430,7 @@ class WellVintageDialog(QDialog):
         ax.yaxis.set_major_locator(MaxNLocator(integer=True))
 
     def _draw_qo_wor(self, ax, selected: list[str]) -> None:
-        """Scatter/line: cumulative oil (X) vs WOR (Y) per vintage group."""
+        """Cumulative Qo vs WOR: each vintage group includes all wells from that year and earlier."""
         prod_col = COL_GAS if self._phase == "gas" else COL_OIL
         vintage: dict[str, int] = {
             w: self._vintage_cache[w]
@@ -444,31 +445,43 @@ class WellVintageDialog(QDialog):
             ax.set_title("Нет данных")
             return
 
-        # Need water column for WOR
         water_col = COL_WATER if COL_WATER in sub.columns else None
         if water_col is None:
             ax.set_title("Нет данных по воде")
             return
 
-        sub["_vintage"] = sub[COL_WELL].map(vintage).astype(int)
-
-        # Aggregate oil and water per vintage per date
-        agg = sub.groupby([COL_DATE, "_vintage"]).agg(
-            {prod_col: "sum", water_col: "sum"}
-        ).sort_index()
-
         years_sorted = sorted(set(vintage.values()))
+
+        # For each vintage year, include all wells started in that year or earlier,
+        # but only plot from 01.01 of that year onward (where new wells diverge)
         for ki, yr in enumerate(years_sorted):
-            if yr not in agg.index.get_level_values(1):
+            wells_up_to = [w for w, v in vintage.items() if v <= yr]
+            if not wells_up_to:
                 continue
-            grp = agg.xs(yr, level="_vintage")
-            qo_cum = np.cumsum(grp[prod_col].values.astype(float))
-            qw = grp[water_col].values.astype(float)
-            qo_m = grp[prod_col].values.astype(float)
-            wor = np.divide(qw, qo_m, out=np.zeros_like(qo_m), where=qo_m > 0)
+            ws = sub[sub[COL_WELL].isin(wells_up_to)]
+            agg = ws.groupby(COL_DATE).agg({prod_col: "sum", water_col: "sum"}).sort_index()
+            qo_m = agg[prod_col].values.astype(float)
+            qw_m = agg[water_col].values.astype(float)
+            qo_cum = np.cumsum(qo_m)
+            wor = np.divide(qw_m, qo_m, out=np.full_like(qo_m, np.nan), where=qo_m > 0)
+            # For the first group, plot everything; for subsequent groups,
+            # start from 01.01 of the vintage year (where new wells join)
+            if ki == 0:
+                start_idx = 0
+            else:
+                start_date = pd.Timestamp(f"{yr}-01-01")
+                dates_arr = agg.index
+                later = np.where(dates_arr >= start_date)[0]
+                start_idx = int(later[0]) if len(later) > 0 else len(qo_m)
+            qo_plot = qo_cum[start_idx:]
+            wor_plot = wor[start_idx:]
+            qo_m_plot = qo_m[start_idx:]
+            mask = qo_m_plot > 0
+            if not np.any(mask):
+                continue
             color = _COLORS[ki % len(_COLORS)]
-            ax.plot(qo_cum, wor, color=color, linewidth=1.0,
-                    label=str(yr), alpha=0.85)
+            ax.plot(qo_plot[mask], wor_plot[mask], color=color, linewidth=1.0,
+                    label=f"≤{yr}", alpha=0.85)
 
         ax.set_xlabel("Нак. нефть, т")
         ax.set_ylabel("ВНФ")

@@ -170,7 +170,7 @@ class MainWindow(QMainWindow):
         wells_menu.addAction(_act("Приведённая добыча по скважинам…", self._on_well_alignment, "Ctrl+A"))
         wells_menu.addSeparator()
         wells_menu.addAction(_act("Группировка скважин по годам ввода…", self._on_well_vintage))
-        wells_menu.addAction(_act("Распределение НДН…", self._on_prod_distribution))
+        wells_menu.addAction(_act("Распределение параметров…", self._on_prod_distribution))
         wells_menu.addAction(_act("Графики Чена…", self._on_chan_plot))
 
         # ── Connections ──────────────────────────────────────────────────────
@@ -466,7 +466,11 @@ class MainWindow(QMainWindow):
             self.status.showMessage("Данные не загружены", 3000)
             return
         from src.ui.well_criteria_dialog import WellCriteriaDialog
-        dlg = WellCriteriaDialog(self.df, parent=self)
+        dlg = WellCriteriaDialog(
+            self.df,
+            current_wells=self._selected_wells,
+            parent=self,
+        )
         if dlg.exec() != WellCriteriaDialog.DialogCode.Accepted:
             return
         matched = dlg.matched_wells()

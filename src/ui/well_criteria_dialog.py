@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QHBoxLayout,
@@ -93,11 +94,17 @@ class _CriteriaRow(QWidget):
 class WellCriteriaDialog(QDialog):
     """Dialog for selecting wells by computed criteria."""
 
-    def __init__(self, df: pd.DataFrame, parent=None) -> None:
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        current_wells: list[str] | None = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Выбрать скважины по критерию")
-        self.resize(480, 220)
+        self.resize(480, 250)
         self._df = df
+        self._current_wells: list[str] = list(current_wells) if current_wells else []
         self._matched_wells: list[str] = []
 
         self._rows: list[_CriteriaRow] = []
@@ -121,6 +128,14 @@ class WellCriteriaDialog(QDialog):
         btn_row.addWidget(self._btn_add)
         btn_row.addStretch()
         root.addLayout(btn_row)
+
+        # Use current filter checkbox
+        self._chk_current = QCheckBox("Применить к текущему фильтру")
+        self._chk_current.setToolTip(
+            "Применить критерии только к уже выбранным скважинам."
+        )
+        self._chk_current.setEnabled(bool(self._current_wells))
+        root.addWidget(self._chk_current)
 
         root.addStretch()
 
@@ -212,7 +227,13 @@ class WellCriteriaDialog(QDialog):
 
         # Compute per-well metrics (lazy — only compute what's needed)
         needed_keys = {c[0] for c in criteria}
-        wells = sorted(str(w) for w in sub[COL_WELL].unique() if pd.notna(w))
+        all_wells = sorted(str(w) for w in sub[COL_WELL].unique() if pd.notna(w))
+        # Restrict to current selection if checkbox is on
+        if self._chk_current.isChecked() and self._current_wells:
+            cur_set = set(self._current_wells)
+            wells = [w for w in all_wells if w in cur_set]
+        else:
+            wells = all_wells
         well_groups = sub.groupby(COL_WELL)
 
         metrics: dict[str, dict[str, float]] = {w: {} for w in wells}

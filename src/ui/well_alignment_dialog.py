@@ -41,8 +41,8 @@ from PySide6.QtWidgets import (
 )
 
 from src.data.models import (
-    COL_DATE, COL_GAS, COL_HOURS_WORK, COL_OIL, COL_WATER, COL_WELL,
-    COL_WORK_TYPE, WellAnalysisScenario, WORK_TYPE_OIL,
+    COL_DATE, COL_GAS, COL_HOURS_WORK, COL_LIQUID, COL_OIL, COL_WATER,
+    COL_WELL, COL_WORK_TYPE, WellAnalysisScenario, WORK_TYPE_OIL,
 )
 
 # 20-colour palette
@@ -150,15 +150,20 @@ class WellAlignmentDialog(QDialog):
         self._cmb_phase = QComboBox()
         self._cmb_phase.addItem("Нефть", "oil")
         self._cmb_phase.addItem("Газ",   "gas")
+        self._cmb_phase.addItem("Жидкость", "liquid")
         phase_mode_row.addWidget(self._cmb_phase)
         phase_mode_row.addSpacing(8)
         phase_mode_row.addWidget(QLabel("Режим:"))
         self._cmb_mode = QComboBox()
         self._cmb_mode.addItem("Добыча", "production")
         self._cmb_mode.addItem("Дебит", "rate")
+        self._cmb_mode.addItem("Обводнённость", "watercut")
+        self._cmb_mode.addItem("Газовый фактор", "gor")
         self._cmb_mode.setToolTip(
             "Добыча — месячная добыча (т/мес или м³/мес).\n"
-            "Дебит — суточный дебит = добыча / (часы работы / 24)."
+            "Дебит — суточный дебит = добыча / (часы работы / 24).\n"
+            "Обводнённость — вода / жидкость.\n"
+            "Газовый фактор — газ / нефть."
         )
         phase_mode_row.addWidget(self._cmb_mode)
         phase_mode_row.addStretch()
@@ -1074,7 +1079,13 @@ class WellAlignmentDialog(QDialog):
             self._well_groups = None
 
     def _producing_wells(self) -> list[str]:
-        prod_col = COL_GAS if self._phase == "gas" else COL_OIL
+        # For liquid/watercut/gor modes, use oil as the base for well selection
+        if self._phase == "liquid":
+            prod_col = COL_LIQUID if COL_LIQUID in self._df_prod.columns else COL_OIL
+        elif self._phase == "gas":
+            prod_col = COL_GAS
+        else:
+            prod_col = COL_OIL
         if prod_col not in self._df_prod.columns:
             return []
         totals = self._df_prod.groupby(COL_WELL)[prod_col].sum()
@@ -1091,10 +1102,18 @@ class WellAlignmentDialog(QDialog):
           - the working days are below the min-days filter.
         iso_dates are ISO-formatted strings for each month row.
 
-        When mode is 'rate', y = production / (hours_work / 24) per well.
+        Supported modes: production, rate, watercut, gor.
         """
-        prod_col = COL_GAS if self._phase == "gas" else COL_OIL
-        is_rate_mode = self._cmb_mode.currentData() == "rate"
+        mode = self._cmb_mode.currentData()
+        phase = self._phase
+
+        # Determine the primary production column
+        if phase == "liquid":
+            prod_col = COL_LIQUID if COL_LIQUID in self._df_prod.columns else COL_OIL
+        elif phase == "gas":
+            prod_col = COL_GAS
+        else:
+            prod_col = COL_OIL
 
         # Use pre-grouped data for O(1) per-well access
         if self._well_groups is None:
@@ -1106,7 +1125,34 @@ class WellAlignmentDialog(QDialog):
         if COL_DATE not in sub.columns or prod_col not in sub.columns:
             return None
 
-        if is_rate_mode and COL_HOURS_WORK in sub.columns:
+        if mode == "watercut":
+            # Watercut = water / liquid per month
+            need = [COL_WATER]
+            liq_col = COL_LIQUID if COL_LIQUID in sub.columns else None
+            if COL_WATER not in sub.columns:
+                return None
+            agg_cols = {COL_OIL: "sum", COL_WATER: "sum"}
+            if liq_col and liq_col in sub.columns:
+                agg_cols[liq_col] = "sum"
+            agg = sub.groupby(COL_DATE).agg(agg_cols).sort_index()
+            oil = agg[COL_OIL].values.astype(float)
+            water = agg[COL_WATER].values.astype(float)
+            liq = agg[liq_col].values.astype(float) if liq_col and liq_col in agg.columns else oil + water
+            raw_vals = np.divide(water, liq, out=np.zeros(len(liq), dtype=float), where=liq > 0)
+            agg_series = pd.Series(raw_vals, index=agg.index)
+            # Use oil > 0 for date alignment
+            pos_ref = pd.Series(oil, index=agg.index)
+        elif mode == "gor":
+            # GOR = gas / oil per month
+            if COL_GAS not in sub.columns or COL_OIL not in sub.columns:
+                return None
+            agg = sub.groupby(COL_DATE).agg({COL_OIL: "sum", COL_GAS: "sum"}).sort_index()
+            oil = agg[COL_OIL].values.astype(float)
+            gas = agg[COL_GAS].values.astype(float)
+            raw_vals = np.divide(gas, oil, out=np.zeros(len(oil), dtype=float), where=oil > 0)
+            agg_series = pd.Series(raw_vals, index=agg.index)
+            pos_ref = pd.Series(oil, index=agg.index)
+        elif mode == "rate" and COL_HOURS_WORK in sub.columns:
             # Daily rate = production / producing_days
             agg = sub.groupby(COL_DATE).agg(
                 {prod_col: "sum", COL_HOURS_WORK: "sum"}
@@ -1117,12 +1163,15 @@ class WellAlignmentDialog(QDialog):
                 out=np.zeros(len(days), dtype=float), where=days > 0,
             )
             agg_series = pd.Series(raw_vals, index=agg.index)
+            pos_ref = agg_series
         else:
+            # production mode
             agg_series = sub.groupby(COL_DATE)[prod_col].sum().sort_index()
+            pos_ref = agg_series
 
         if len(agg_series) == 0:
             return None
-        positive_dates = agg_series[agg_series > 0].index
+        positive_dates = pos_ref[pos_ref > 0].index
         if len(positive_dates) == 0:
             return None
         agg_series = agg_series[agg_series.index >= positive_dates[0]]
@@ -1132,14 +1181,17 @@ class WellAlignmentDialog(QDialog):
         y = y_raw.copy()
 
         # ── Criteria filters (applied before user exclusions) ────────────────
+        # Skip rate/days filters for ratio modes (watercut, GOR) —
+        # the min-rate threshold makes no sense for 0–1 fractions or GOR values.
+        apply_filters = mode not in ("watercut", "gor")
         min_rate = self._spn_min_rate.value()
-        if min_rate > 0:
+        if apply_filters and min_rate > 0:
             for i, v in enumerate(y_raw):
                 if np.isfinite(v) and v < min_rate:
                     y[i] = np.nan
 
         min_days = self._spn_min_days.value()
-        if min_days > 0 and COL_HOURS_WORK in sub.columns:
+        if apply_filters and min_days > 0 and COL_HOURS_WORK in sub.columns:
             hours_agg = sub.groupby(COL_DATE)[COL_HOURS_WORK].sum().sort_index()
             hours_aligned = hours_agg.reindex(agg_series.index, fill_value=0.0)
             for i, hours in enumerate(hours_aligned.values):
@@ -1154,9 +1206,15 @@ class WellAlignmentDialog(QDialog):
         # ── Trim leading NaNs so month 1 = first valid (non-filtered) value ──
         first_valid = -1
         for i in range(len(y)):
-            if np.isfinite(y[i]) and y[i] > 0:
-                first_valid = i
-                break
+            if mode in ("watercut", "gor"):
+                # Ratio modes: 0 is a valid value
+                if np.isfinite(y[i]):
+                    first_valid = i
+                    break
+            else:
+                if np.isfinite(y[i]) and y[i] > 0:
+                    first_valid = i
+                    break
         if first_valid < 0:
             return None  # all values filtered out
         if first_valid > 0:
@@ -1340,10 +1398,24 @@ class WellAlignmentDialog(QDialog):
         _mode = self._cmb_mode.currentData()
         if self._chk_normalize.isChecked():
             y_lbl = "Относительное значение"
+        elif _mode == "watercut":
+            y_lbl = "Обводнённость"
+        elif _mode == "gor":
+            y_lbl = "Газовый фактор, м³/т"
         elif _mode == "rate":
-            y_lbl = "Дебит газа, м\u00b3/сут" if self._phase == "gas" else "Дебит нефти, т/сут"
+            if self._phase == "gas":
+                y_lbl = "Дебит газа, м\u00b3/сут"
+            elif self._phase == "liquid":
+                y_lbl = "Дебит жидкости, т/сут"
+            else:
+                y_lbl = "Дебит нефти, т/сут"
         else:
-            y_lbl = "Газ, м\u00b3/мес" if self._phase == "gas" else "Нефть, т/мес"
+            if self._phase == "gas":
+                y_lbl = "Газ, м\u00b3/мес"
+            elif self._phase == "liquid":
+                y_lbl = "Жидкость, т/мес"
+            else:
+                y_lbl = "Нефть, т/мес"
         ax.set_ylabel(y_lbl)
         title = "Приведённая добыча по скважинам"
         lbl = self._scenario_label()
