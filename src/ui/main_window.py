@@ -92,6 +92,11 @@ class MainWindow(QMainWindow):
         self._well_coords_mapping: dict = {}
         self._well_coords_delimiters: dict = {}
 
+        # SQLite-derived source references (path + oilfield/object ids/names
+        # only — the extracted rows themselves are re-read from the DB on
+        # project reopen, not stored in the project file)
+        self._sqlite_sources: list[dict] = []
+
         # Plot overlay references (for in-place update)
         self._trend_line = None
         self._forecast_line = None
@@ -141,7 +146,8 @@ class MainWindow(QMainWindow):
 
         # Файл
         file_menu = menu.addMenu("Файл")
-        file_menu.addAction(_act("Открыть данные…",       self._on_load,            "Ctrl+Shift+O"))
+        file_menu.addAction(_act("Открыть из CSV…",       self._on_load,            "Ctrl+Shift+O"))
+        file_menu.addAction(_act("Открыть из БД…", self._on_load_sqlite))
         file_menu.addAction(_act("Открыть проект…",       self._on_load_project,    "Ctrl+O"))
         file_menu.addSeparator()
         file_menu.addAction(_act("Сохранить проект",        self._on_save,            "Ctrl+S"))
@@ -186,6 +192,7 @@ class MainWindow(QMainWindow):
 
         # ── Connections ─────────────────────────────────────────────────────────────────────────────────
         self.data_panel.btn_load.clicked.connect(self._on_load)
+        self.data_panel.btn_load_db.clicked.connect(self._on_load_sqlite)
         self.data_panel.wells_changed.connect(self._on_wells_changed)
         self.method_panel.build_requested.connect(self._on_build_forecast)
         self.method_panel.discard_requested.connect(self._on_discard)
@@ -307,6 +314,7 @@ class MainWindow(QMainWindow):
         self._well_coords_path      = ""
         self._well_coords_mapping   = {}
         self._well_coords_delimiters = {}
+        self._sqlite_sources        = []
         self._update_well_coords_ui()
 
         # Reset UI
@@ -381,7 +389,27 @@ class MainWindow(QMainWindow):
         if not valid_dfs:
             return
 
-        # ── Merge all selected files into one new dataframe ───────────────
+        self._finish_data_load(valid_dfs)
+
+    def _finish_data_load(
+        self,
+        valid_dfs: list[tuple[str, pd.DataFrame]],
+        source_paths_for_persistence: list[str] | None = None,
+    ) -> bool | None:
+        """Merge newly loaded dataframe(s) into the project.
+
+        Shared tail used by both file-based loading (:meth:`_on_load`) and
+        SQLite-based loading (:meth:`_on_load_sqlite`). *valid_dfs* is a list
+        of ``(label, dataframe)`` pairs. *source_paths_for_persistence*
+        controls what (if anything) is recorded into ``self._source_files``
+        — pass an empty list for sources that cannot be reloaded via
+        ``read_raw``/``load_file`` (e.g. SQLite-derived data); pass ``None``
+        (default) to record the *valid_dfs* labels themselves, as file paths.
+
+        Returns ``True``/``False`` for append/replace, or ``None`` if the
+        user cancelled (nothing was changed).
+        """
+        # ── Merge all selected sources into one new dataframe ───────────────
         if len(valid_dfs) == 1:
             new_path, new_df = valid_dfs[0]
         else:
@@ -392,13 +420,13 @@ class MainWindow(QMainWindow):
             new_df = recompute_derived(concat_df)
             new_path = " + ".join(p for p, _ in valid_dfs)
 
-        # ── Decide: load fresh or append to existing ───────────────────
+        # ── Decide: load fresh or append to existing ─────────────
         if self.df is not None:
             msg_box = QMessageBox(self)
             msg_box.setWindowTitle("Данные уже загружены")
             msg_box.setText(
                 f"В приложении уже есть данные ({len(self.df)} строк).\n"
-                "Что сделать с данными из нового файла?"
+                "Что сделать с данными из нового источника?"
             )
             from PySide6.QtWidgets import QPushButton
             btn_append  = msg_box.addButton("Добавить",  QMessageBox.ButtonRole.AcceptRole)
@@ -407,17 +435,20 @@ class MainWindow(QMainWindow):
             msg_box.exec()
             clicked = msg_box.clickedButton()
             if clicked is None or clicked not in (btn_append, btn_replace):
-                return
+                return None
             append = clicked is btn_append
         else:
             append = False
 
-        # ── Apply the chosen action ───────────────────────────────────
+        # ── Apply the chosen action ───────────────────
         self._saved_results.clear()
         self._fit_result_text = ""
         self._current_save_path = ""        # data changed; clear associated project file
         self._act_project_info.setEnabled(False)
-        new_paths = [p for p, _ in valid_dfs]
+        if source_paths_for_persistence is None:
+            new_paths = [p for p, _ in valid_dfs]
+        else:
+            new_paths = source_paths_for_persistence
         if append:
             combined = pd.concat([self.df, new_df], ignore_index=True)
             combined = combined.drop_duplicates(
@@ -460,6 +491,38 @@ class MainWindow(QMainWindow):
 
         self._update_window_title()
         self._refresh_scenario_combo()
+        return append
+
+    def _on_load_sqlite(self) -> None:
+        """Open the SQLite import dialog and merge the selected data."""
+        from src.ui.sqlite_import_dialog import SQLiteImportDialog
+        dlg = SQLiteImportDialog(parent=self)
+        if dlg.exec() != SQLiteImportDialog.DialogCode.Accepted:
+            return
+
+        new_df = dlg.result_dataframe()
+        if new_df is None or new_df.empty:
+            self.status.showMessage("Нет данных для загрузки", 3000)
+            return
+
+        db_path = dlg.result_db_path()
+        label = f"SQLite: {db_path}"
+        append = self._finish_data_load([(label, new_df)], source_paths_for_persistence=[])
+        if append is None:
+            return  # user cancelled the append/replace prompt
+
+        entry = {"db_path": db_path, "objects": dlg.result_object_specs()}
+        if append:
+            self._sqlite_sources.append(entry)
+        else:
+            self._sqlite_sources = [entry]
+        self._update_well_coords_ui()
+
+        n_coords = len(dlg.result_well_coords())
+        if n_coords:
+            self.status.showMessage(
+                f"Загружено координат скважин из БД: {n_coords}", 5000
+            )
 
     # ── Well selection → plot
 
@@ -2107,9 +2170,7 @@ class MainWindow(QMainWindow):
             self.df,
             well_analysis_scenarios=self._well_analysis_scenarios,
             parent=self,
-            well_coords_path=self._well_coords_path,
-            well_coords_mapping=self._well_coords_mapping,
-            well_coords_delimiters=self._well_coords_delimiters,
+            well_coords=self._resolve_all_well_coords(),
         )
         self._well_alignment_dlg.finished.connect(self._on_well_alignment_closed)
         self._well_alignment_dlg.show()
@@ -2146,9 +2207,7 @@ class MainWindow(QMainWindow):
         dlg = ProductionDistributionDialog(
             self.df,
             parent=self,
-            well_coords_path=self._well_coords_path,
-            well_coords_mapping=self._well_coords_mapping,
-            well_coords_delimiters=self._well_coords_delimiters,
+            well_coords=self._resolve_all_well_coords(),
         )
         dlg.exec()
 
@@ -2182,21 +2241,50 @@ class MainWindow(QMainWindow):
 
     def _update_well_coords_ui(self) -> None:
         """Toggle UI elements that depend on whether coordinates are loaded."""
-        has_coords = bool(self._well_coords_path)
+        has_coords = bool(self._well_coords_path) or bool(self._sqlite_sources)
         self._act_show_wells.setVisible(has_coords)
         self.data_panel.set_map_button_visible(has_coords)
 
+    def _resolve_all_well_coords(self) -> dict[str, tuple[float, float]]:
+        """Merge well coordinates from every loaded source (SQLite + file).
+
+        Re-derives everything on demand from already-persisted references
+        (``self._sqlite_sources``, ``self._well_coords_path``) — no
+        coordinate values are cached in the project itself. File-based
+        coordinates win over SQLite-derived ones on a name collision, since
+        loading a coordinates file is a deliberate, explicit user action.
+        """
+        coords: dict[str, tuple[float, float]] = {}
+        if self._sqlite_sources:
+            from src.data.sqlite_loader import SQLiteLoaderError, build_dataframe_for_objects
+            for entry in self._sqlite_sources:
+                try:
+                    _df, _conflicts, sqlite_coords = build_dataframe_for_objects(
+                        entry["db_path"], entry["objects"], include_coords=True
+                    )
+                except SQLiteLoaderError:
+                    continue
+                coords.update(sqlite_coords)
+        if self._well_coords_path:
+            from src.ui.well_coords_dialog import resolve_file_well_coords
+            file_coords = resolve_file_well_coords(
+                self._well_coords_path,
+                self._well_coords_mapping,
+                self._well_coords_delimiters,
+            )
+            coords.update(file_coords)
+        return coords
+
     def _on_select_wells_on_map(self) -> None:
         """Select wells for the main well list via a contour on the map."""
-        if not self._well_coords_path:
+        coords = self._resolve_all_well_coords()
+        if not coords:
             self.status.showMessage("Координаты скважин не загружены", 3000)
             return
         from src.ui.well_location_dialog import WellLocationDialog
         cur = self.data_panel.get_selected_wells()
         dlg = WellLocationDialog(
-            self._well_coords_path,
-            self._well_coords_mapping,
-            self._well_coords_delimiters,
+            coords,
             parent=self,
             selection_mode=True,
             initial_selection=cur,
@@ -2208,13 +2296,14 @@ class MainWindow(QMainWindow):
         self.status.showMessage(f"Выбрано на карте: {len(matched)} скважин", 5000)
 
     def _on_show_wells(self) -> None:
-        """Open the well location map (reads the coordinates file fresh).
+        """Open the well location map (re-resolves coordinates fresh).
 
         Non-modal: the main window remains usable while this is open. If a
         map window is already open, it is refreshed and brought to front
         instead of opening a duplicate.
         """
-        if not self._well_coords_path:
+        coords = self._resolve_all_well_coords()
+        if not coords:
             self.status.showMessage("Координаты скважин не загружены", 3000)
             return
         dlg = getattr(self, "_well_location_dlg", None)
@@ -2222,9 +2311,7 @@ class MainWindow(QMainWindow):
             dlg.close()
         from src.ui.well_location_dialog import WellLocationDialog
         self._well_location_dlg = WellLocationDialog(
-            self._well_coords_path,
-            self._well_coords_mapping,
-            self._well_coords_delimiters,
+            coords,
             parent=self,
         )
         self._well_location_dlg.finished.connect(self._on_well_location_closed)
@@ -2569,6 +2656,16 @@ class MainWindow(QMainWindow):
         else:
             lines.append("\u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u0438 \u0434\u0430\u043d\u043d\u044b\u0445:  \u2014")
         lines.append("")
+        if self._sqlite_sources:
+            lines.append("\u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u0438 \u0434\u0430\u043d\u043d\u044b\u0445 \u0438\u0437 \u0411\u0414:")
+            for entry in self._sqlite_sources:
+                lines.append(f"  {entry.get('db_path', '\u2014')}")
+                for obj in entry.get("objects", []):
+                    lines.append(
+                        f"    {obj.get('oilfield_name', '?')} / {obj.get('object_name', '?')}"
+                    )
+        else:
+            lines.append("\u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u0438 \u0434\u0430\u043d\u043d\u044b\u0445 \u0438\u0437 \u0411\u0414:  \u2014")
         lines.append(f"\u0421\u0446\u0435\u043d\u0430\u0440\u0438\u0435\u0432 \u043f\u0440\u043e\u0433\u043d\u043e\u0437\u0430:  {len(self._scenarios)}")
         lines.append(f"\u0421\u0446\u0435\u043d\u0430\u0440\u0438\u0435\u0432 \u043f\u0440\u0438\u0432\u0435\u0434\u0451\u043d\u043d\u043e\u0439 \u0434\u043e\u0431\u044b\u0447\u0438:  {len(self._well_analysis_scenarios)}")
         lines.append("")
@@ -2645,6 +2742,42 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+        # ── Reload SQLite-derived sources, if any ─────────────
+        sqlite_sources: list[dict] = project.get("sqlite_sources", [])
+        resolved_sqlite_sources: list[dict] = []
+        for entry in sqlite_sources:
+            db_path = entry.get("db_path", "")
+            objects = entry.get("objects", [])
+            resolved_db_path = db_path
+            if not os.path.exists(resolved_db_path):
+                reply = QMessageBox.question(
+                    self,
+                    "База данных не найдена",
+                    f"База данных не найдена:\n{resolved_db_path}\n\n"
+                    "Указать другое расположение?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                if reply == QMessageBox.StandardButton.Yes:
+                    new_db_path, _ = QFileDialog.getOpenFileName(
+                        self, "Найти базу данных", "",
+                        "SQLite базы (*.sqldb *.db *.sqlite);;Все файлы (*)",
+                    )
+                    if new_db_path:
+                        resolved_db_path = new_db_path
+                    else:
+                        continue
+                else:
+                    continue
+            try:
+                from src.data.sqlite_loader import build_dataframe_for_objects
+                df_sql, _conflicts, _well_coords = build_dataframe_for_objects(
+                    resolved_db_path, objects, include_coords=False
+                )
+                loaded_dfs.append(df_sql)
+            except Exception:
+                continue
+            resolved_sqlite_sources.append({"db_path": resolved_db_path, "objects": objects})
+
         # Merge all loaded dataframes
         if loaded_dfs:
             if len(loaded_dfs) == 1:
@@ -2674,6 +2807,7 @@ class MainWindow(QMainWindow):
         self._well_coords_path         = project.get("well_coords_path", "")
         self._well_coords_mapping      = project.get("well_coords_mapping", {})
         self._well_coords_delimiters   = project.get("well_coords_delimiters", {})
+        self._sqlite_sources           = resolved_sqlite_sources
         self._update_well_coords_ui()
 
         # Load scenario 0 into working buffers (no commit needed — nothing to commit)
@@ -2756,6 +2890,7 @@ class MainWindow(QMainWindow):
                 well_coords_path=self._well_coords_path,
                 well_coords_mapping=self._well_coords_mapping,
                 well_coords_delimiters=self._well_coords_delimiters,
+                sqlite_sources=self._sqlite_sources,
             )
             self._act_project_info.setEnabled(True)
             self._refresh_forecast_plots()

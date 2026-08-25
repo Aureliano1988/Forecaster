@@ -65,17 +65,13 @@ class WellAlignmentDialog(QDialog):
         df: pd.DataFrame,
         well_analysis_scenarios: list | None = None,
         parent=None,
-        well_coords_path: str = "",
-        well_coords_mapping: dict | None = None,
-        well_coords_delimiters: dict | None = None,
+        well_coords: dict[str, tuple[float, float]] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Приведённая добыча по скважинам")
         self.resize(1340, 720)
         self._df = df
-        self._coords_path = well_coords_path
-        self._coords_mapping = well_coords_mapping or {}
-        self._coords_delimiters = well_coords_delimiters or {}
+        self._coords = well_coords or {}
 
         # Scenario state
         self._scenarios: list[WellAnalysisScenario] = list(
@@ -215,7 +211,7 @@ class WellAlignmentDialog(QDialog):
         btn_filter = QPushButton("Список\u2026")
         btn_filter.clicked.connect(self._load_filter)
         nav_row.addWidget(btn_filter)
-        if self._coords_path:
+        if self._coords:
             btn_map = QPushButton("На карте\u2026")
             btn_map.setToolTip("Выбрать скважины контуром на карте")
             btn_map.clicked.connect(self._on_select_on_map)
@@ -821,7 +817,7 @@ class WellAlignmentDialog(QDialog):
         from src.ui.well_location_dialog import WellLocationDialog
         cur = [item.text() for item in self._lst.selectedItems()]
         dlg = WellLocationDialog(
-            self._coords_path, self._coords_mapping, self._coords_delimiters,
+            self._coords,
             parent=self, selection_mode=True, initial_selection=cur,
         )
         if dlg.exec() != WellLocationDialog.DialogCode.Accepted:

@@ -11,6 +11,8 @@ backend/.venv/
 # Data files
 *.csv
 *.xls*
+*.*db*
+*.*sql*
 
 # PyInstaller build output
 build/

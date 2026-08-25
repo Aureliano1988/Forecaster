@@ -56,9 +56,13 @@ class DataPanel(QWidget):
 
         layout = QVBoxLayout(self)
 
-        # ── Load button ──────────────────────────────────────────────────────
-        self.btn_load = QPushButton("Загрузить данные…")
-        layout.addWidget(self.btn_load)
+        # ── Load buttons ──────────────────────────────────────
+        load_row = QHBoxLayout()
+        self.btn_load = QPushButton("Загрузить из CSV…")
+        self.btn_load_db = QPushButton("Загрузить из БД…")
+        load_row.addWidget(self.btn_load)
+        load_row.addWidget(self.btn_load_db)
+        layout.addLayout(load_row)
 
         # ── Info label ───────────────────────────────────────────────────────
         self.lbl_info = QLabel("Файл не загружен")

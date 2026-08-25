@@ -74,6 +74,43 @@ def build_separator_pattern(delimiters: dict[str, bool]) -> str:
     return f"[{re.escape(chars)}]+"
 
 
+def resolve_file_well_coords(
+    path: str, mapping: dict[str, int], delimiters: dict[str, bool]
+) -> dict[str, tuple[float, float]]:
+    """Parse a well-coordinates text file into ``{well_name: (x, y)}``.
+
+    Rows whose well/X/Y columns are missing, non-numeric, or whose
+    coordinates are both zero are skipped. Re-reads *path* fresh on every
+    call — no coordinate data is cached between calls.
+    """
+    coords: dict[str, tuple[float, float]] = {}
+    idx_well = mapping.get("well")
+    idx_x = mapping.get("x")
+    idx_y = mapping.get("y")
+    if not path or idx_well is None or idx_x is None or idx_y is None:
+        return coords
+
+    pattern = build_separator_pattern(delimiters)
+    for line in read_text_lines(path):
+        if not line.strip():
+            continue
+        parts = re.split(pattern, line.strip())
+        if max(idx_well, idx_x, idx_y) >= len(parts):
+            continue
+        name = parts[idx_well].strip()
+        if not name:
+            continue
+        try:
+            x = float(parts[idx_x].replace(",", "."))
+            y = float(parts[idx_y].replace(",", "."))
+        except ValueError:
+            continue
+        if x == 0 and y == 0:
+            continue
+        coords[name] = (x, y)
+    return coords
+
+
 class WellCoordsDialog(QDialog):
     """Dialog to select a well-coordinates file and assign its columns.
 

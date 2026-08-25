@@ -117,6 +117,7 @@ def save_fcst_file(
     well_coords_path: str = "",
     well_coords_mapping: dict | None = None,
     well_coords_delimiters: dict | None = None,
+    sqlite_sources: list[dict] | None = None,
 ) -> None:
     """Save all forecast scenarios to a .fcst v2.0 JSON file.
 
@@ -160,6 +161,7 @@ def save_fcst_file(
         "well_coords_path": well_coords_path or "",
         "well_coords_mapping": well_coords_mapping or {},
         "well_coords_delimiters": well_coords_delimiters or {},
+        "sqlite_sources": sqlite_sources or [],
     }
     Path(path).write_text(
         json.dumps(data, ensure_ascii=False, indent=2),
@@ -283,4 +285,5 @@ def load_fcst_file(path: str | Path) -> dict:
         "well_coords_path": data.get("well_coords_path", ""),
         "well_coords_mapping": data.get("well_coords_mapping", {}),
         "well_coords_delimiters": data.get("well_coords_delimiters", {}),
+        "sqlite_sources": data.get("sqlite_sources", []),
     }

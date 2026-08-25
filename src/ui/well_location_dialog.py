@@ -1,14 +1,15 @@
 """Well location dialog — plot well X/Y coordinates with name labels.
 
-Reads the well-coordinates file referenced by the project (path + column
-mapping + separator settings, as captured by ``WellCoordsDialog``) fresh
-each time it is opened. Wells with (0, 0) coordinates are omitted.
+Takes an already-resolved ``{well_name: (x, y)}`` mapping (from a text
+file, a SQLite database, or a merge of both — see
+``MainWindow._resolve_all_well_coords()``) and is purely a presentation /
+selection component over it. Wells with (0, 0) coordinates are expected to
+already be excluded by whoever resolved the mapping.
 """
 
 from __future__ import annotations
 
 import io
-import re
 
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
@@ -21,12 +22,9 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QPushButton,
     QVBoxLayout,
 )
-
-from src.ui.well_coords_dialog import build_separator_pattern, read_text_lines
 
 
 class WellLocationDialog(QDialog):
@@ -34,13 +32,13 @@ class WellLocationDialog(QDialog):
 
     Usage (browse-only, non-modal)::
 
-        dlg = WellLocationDialog(coords_path, mapping, delimiters, parent=self)
+        dlg = WellLocationDialog(coords, parent=self)
         dlg.show()
 
     Usage (selection mode, modal)::
 
         dlg = WellLocationDialog(
-            coords_path, mapping, delimiters, parent=self,
+            coords, parent=self,
             selection_mode=True, initial_selection=current_wells,
         )
         if dlg.exec() == WellLocationDialog.DialogCode.Accepted:
@@ -53,9 +51,7 @@ class WellLocationDialog(QDialog):
 
     def __init__(
         self,
-        coords_path: str,
-        mapping: dict[str, int],
-        delimiters: dict[str, bool],
+        coords: dict[str, tuple[float, float]],
         parent=None,
         selection_mode: bool = False,
         initial_selection: list[str] | None = None,
@@ -64,9 +60,7 @@ class WellLocationDialog(QDialog):
         self.setWindowTitle("Расположение скважин")
         self.resize(900, 700)
 
-        self._coords_path = coords_path
-        self._mapping = mapping
-        self._delimiters = delimiters
+        self._coords = coords or {}
 
         self._selection_mode = selection_mode
         self._selected: set[str] = set(initial_selection or []) if selection_mode else set()
@@ -134,66 +128,17 @@ class WellLocationDialog(QDialog):
             buttons.rejected.connect(self.reject)
             root.addWidget(buttons)
 
-    # ── Data ─────────────────────────────────────────────────────────────
-
-    def _parse_coords(self) -> tuple[list[str], list[float], list[float], int]:
-        """Return (names, xs, ys, n_skipped_zero) parsed from the file.
-
-        Rows whose well/X/Y columns are missing, non-numeric, or whose
-        coordinates are both zero are skipped.
-        """
-        names: list[str] = []
-        xs: list[float] = []
-        ys: list[float] = []
-        n_skipped = 0
-
-        idx_well = self._mapping.get("well")
-        idx_x = self._mapping.get("x")
-        idx_y = self._mapping.get("y")
-        if idx_well is None or idx_x is None or idx_y is None:
-            return names, xs, ys, n_skipped
-
-        pattern = build_separator_pattern(self._delimiters)
-        for line in read_text_lines(self._coords_path):
-            if not line.strip():
-                continue
-            parts = re.split(pattern, line.strip())
-            if max(idx_well, idx_x, idx_y) >= len(parts):
-                continue
-            name = parts[idx_well].strip()
-            if not name:
-                continue
-            try:
-                x = float(parts[idx_x].replace(",", "."))
-                y = float(parts[idx_y].replace(",", "."))
-            except ValueError:
-                continue
-            if x == 0 and y == 0:
-                n_skipped += 1
-                continue
-            names.append(name)
-            xs.append(x)
-            ys.append(y)
-        return names, xs, ys, n_skipped
+    # ── Data ───────────────────────────────────────────────────
 
     def _load_and_draw(self) -> None:
-        try:
-            names, xs, ys, n_skipped = self._parse_coords()
-        except OSError as exc:
-            QMessageBox.critical(
-                self, "Ошибка чтения",
-                f"Не удалось прочитать файл координат:\n{self._coords_path}\n\n{exc}",
-            )
-            names, xs, ys, n_skipped = [], [], [], 0
+        names = sorted(self._coords.keys())
+        xs = [self._coords[n][0] for n in names]
+        ys = [self._coords[n][1] for n in names]
 
         self._names, self._xs, self._ys = names, xs, ys
         self._draw()
 
-        total = len(names) + n_skipped
-        info = f"Показано скважин: {len(names)} из {total}"
-        if n_skipped:
-            info += f" (пропущено с нулевыми координатами: {n_skipped})"
-        self._lbl_info.setText(info)
+        self._lbl_info.setText(f"Показано скважин: {len(names)}")
         if self._selection_mode:
             self._update_selection_label()
 

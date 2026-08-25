@@ -55,17 +55,13 @@ class ProductionDistributionDialog(QDialog):
         self,
         df: pd.DataFrame,
         parent=None,
-        well_coords_path: str = "",
-        well_coords_mapping: dict | None = None,
-        well_coords_delimiters: dict | None = None,
+        well_coords: dict[str, tuple[float, float]] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Распределение")
         self.resize(1100, 650)
         self._df = df
-        self._coords_path = well_coords_path
-        self._coords_mapping = well_coords_mapping or {}
-        self._coords_delimiters = well_coords_delimiters or {}
+        self._coords = well_coords or {}
 
         # Per-well metrics: {param_key: {well: value}}
         self._well_metrics: dict[str, dict[str, float]] = {}
@@ -201,7 +197,7 @@ class ProductionDistributionDialog(QDialog):
         btn_criteria.clicked.connect(self._on_criteria)
         gw_lay.addWidget(btn_criteria)
 
-        if self._coords_path:
+        if self._coords:
             btn_map = QPushButton("Выбрать на карте\u2026")
             btn_map.clicked.connect(self._on_select_on_map)
             gw_lay.addWidget(btn_map)
@@ -315,7 +311,7 @@ class ProductionDistributionDialog(QDialog):
         from src.ui.well_location_dialog import WellLocationDialog
         cur = [item.text() for item in self._lst.selectedItems()]
         dlg = WellLocationDialog(
-            self._coords_path, self._coords_mapping, self._coords_delimiters,
+            self._coords,
             parent=self, selection_mode=True, initial_selection=cur,
         )
         if dlg.exec() != WellLocationDialog.DialogCode.Accepted:
