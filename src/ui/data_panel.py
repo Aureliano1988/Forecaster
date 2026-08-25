@@ -47,6 +47,7 @@ class DataPanel(QWidget):
     filter_applied   = Signal(list, list)   # emits (found_wells, missing_wells)
     scenario_changed = Signal(int)          # emits new scenario index
     criteria_requested = Signal()           # user clicked "select by criteria"
+    map_selection_requested = Signal()      # user clicked "select on map"
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -94,6 +95,10 @@ class DataPanel(QWidget):
         self.btn_criteria = QPushButton("Выбрать по критерию…")
         grp_layout.addWidget(self.btn_criteria)
 
+        self.btn_map = QPushButton("Выбрать на карте…")
+        self.btn_map.setVisible(False)   # shown only when coordinates are loaded
+        grp_layout.addWidget(self.btn_map)
+
         self.lbl_filter = QLabel("")
         self.lbl_filter.setWordWrap(True)
         grp_layout.addWidget(self.lbl_filter)
@@ -113,9 +118,13 @@ class DataPanel(QWidget):
         self.btn_select_none.clicked.connect(self._deselect_all)
         self.btn_filter.clicked.connect(self._on_load_filter)
         self.btn_criteria.clicked.connect(self.criteria_requested.emit)
+        self.btn_map.clicked.connect(self.map_selection_requested.emit)
         self.well_list.itemSelectionChanged.connect(self._on_selection)
 
     # ── Public ───────────────────────────────────────────────────────────────
+
+    def set_map_button_visible(self, visible: bool) -> None:
+        self.btn_map.setVisible(visible)
 
     def populate_wells(self, wells: list[str]) -> None:
         self.well_list.clear()

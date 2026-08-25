@@ -86,6 +86,12 @@ class MainWindow(QMainWindow):
         # Well alignment analysis scenarios (persisted in the project file)
         self._well_analysis_scenarios: list = []
 
+        # Well coordinates file reference (path + column mapping only — the
+        # coordinate values themselves are never loaded into the project)
+        self._well_coords_path: str = ""
+        self._well_coords_mapping: dict = {}
+        self._well_coords_delimiters: dict = {}
+
         # Plot overlay references (for in-place update)
         self._trend_line = None
         self._forecast_line = None
@@ -172,8 +178,13 @@ class MainWindow(QMainWindow):
         wells_menu.addAction(_act("Группировка скважин по годам ввода…", self._on_well_vintage))
         wells_menu.addAction(_act("Распределение параметров…", self._on_prod_distribution))
         wells_menu.addAction(_act("Графики Чена…", self._on_chan_plot))
+        wells_menu.addSeparator()
+        wells_menu.addAction(_act("Загрузить координаты скважин…", self._on_load_well_coords))
+        self._act_show_wells = _act("Показать скважины…", self._on_show_wells)
+        wells_menu.addAction(self._act_show_wells)
+        self._update_well_coords_ui()
 
-        # ── Connections ──────────────────────────────────────────────────────
+        # ── Connections ─────────────────────────────────────────────────────────────────────────────────
         self.data_panel.btn_load.clicked.connect(self._on_load)
         self.data_panel.wells_changed.connect(self._on_wells_changed)
         self.method_panel.build_requested.connect(self._on_build_forecast)
@@ -186,6 +197,7 @@ class MainWindow(QMainWindow):
         self.method_panel.edit_toggled.connect(self._on_edit_toggle)
         self.data_panel.filter_applied.connect(self._on_filter_applied)
         self.data_panel.criteria_requested.connect(self._on_well_criteria)
+        self.data_panel.map_selection_requested.connect(self._on_select_wells_on_map)
         self.data_panel.scenario_changed.connect(self._on_scenario_combo_changed)
         self.data_panel.chk_active_wells.stateChanged.connect(self._on_plot_data)
         self.method_panel.cmb_dca_mode.currentIndexChanged.connect(self._on_plot_data)
@@ -292,6 +304,10 @@ class MainWindow(QMainWindow):
         self._stoiip                = 0.0
         self._hcpv                  = 0.0
         self._well_analysis_scenarios = []
+        self._well_coords_path      = ""
+        self._well_coords_mapping   = {}
+        self._well_coords_delimiters = {}
+        self._update_well_coords_ui()
 
         # Reset UI
         self._update_window_title()
@@ -2091,6 +2107,9 @@ class MainWindow(QMainWindow):
             self.df,
             well_analysis_scenarios=self._well_analysis_scenarios,
             parent=self,
+            well_coords_path=self._well_coords_path,
+            well_coords_mapping=self._well_coords_mapping,
+            well_coords_delimiters=self._well_coords_delimiters,
         )
         self._well_alignment_dlg.finished.connect(self._on_well_alignment_closed)
         self._well_alignment_dlg.show()
@@ -2124,7 +2143,13 @@ class MainWindow(QMainWindow):
             self.status.showMessage("Данные не загружены", 3000)
             return
         from src.ui.production_distribution_dialog import ProductionDistributionDialog
-        dlg = ProductionDistributionDialog(self.df, parent=self)
+        dlg = ProductionDistributionDialog(
+            self.df,
+            parent=self,
+            well_coords_path=self._well_coords_path,
+            well_coords_mapping=self._well_coords_mapping,
+            well_coords_delimiters=self._well_coords_delimiters,
+        )
         dlg.exec()
 
     def _on_chan_plot(self) -> None:
@@ -2135,6 +2160,81 @@ class MainWindow(QMainWindow):
         from src.ui.chan_plot_dialog import ChanPlotDialog
         dlg = ChanPlotDialog(self.df, parent=self)
         dlg.exec()
+
+    def _on_load_well_coords(self) -> None:
+        """Open the well-coordinates file dialog.
+
+        Only the file location and the chosen separator/column mapping are
+        kept — the coordinate values themselves are never loaded.
+        """
+        from src.ui.well_coords_dialog import WellCoordsDialog
+        dlg = WellCoordsDialog(parent=self)
+        if dlg.exec() != WellCoordsDialog.DialogCode.Accepted:
+            return
+        self._well_coords_path = dlg.result_file_path()
+        self._well_coords_mapping = dlg.result_mapping()
+        self._well_coords_delimiters = dlg.result_delimiters()
+        self._update_well_coords_ui()
+        import os
+        self.status.showMessage(
+            f"Файл координат скважин: {os.path.basename(self._well_coords_path)}", 5000
+        )
+
+    def _update_well_coords_ui(self) -> None:
+        """Toggle UI elements that depend on whether coordinates are loaded."""
+        has_coords = bool(self._well_coords_path)
+        self._act_show_wells.setVisible(has_coords)
+        self.data_panel.set_map_button_visible(has_coords)
+
+    def _on_select_wells_on_map(self) -> None:
+        """Select wells for the main well list via a contour on the map."""
+        if not self._well_coords_path:
+            self.status.showMessage("Координаты скважин не загружены", 3000)
+            return
+        from src.ui.well_location_dialog import WellLocationDialog
+        cur = self.data_panel.get_selected_wells()
+        dlg = WellLocationDialog(
+            self._well_coords_path,
+            self._well_coords_mapping,
+            self._well_coords_delimiters,
+            parent=self,
+            selection_mode=True,
+            initial_selection=cur,
+        )
+        if dlg.exec() != WellLocationDialog.DialogCode.Accepted:
+            return
+        matched = dlg.result_selected_wells()
+        self.data_panel.apply_well_filter(matched)
+        self.status.showMessage(f"Выбрано на карте: {len(matched)} скважин", 5000)
+
+    def _on_show_wells(self) -> None:
+        """Open the well location map (reads the coordinates file fresh).
+
+        Non-modal: the main window remains usable while this is open. If a
+        map window is already open, it is refreshed and brought to front
+        instead of opening a duplicate.
+        """
+        if not self._well_coords_path:
+            self.status.showMessage("Координаты скважин не загружены", 3000)
+            return
+        dlg = getattr(self, "_well_location_dlg", None)
+        if dlg is not None:
+            dlg.close()
+        from src.ui.well_location_dialog import WellLocationDialog
+        self._well_location_dlg = WellLocationDialog(
+            self._well_coords_path,
+            self._well_coords_mapping,
+            self._well_coords_delimiters,
+            parent=self,
+        )
+        self._well_location_dlg.finished.connect(self._on_well_location_closed)
+        self._well_location_dlg.show()
+        self._well_location_dlg.raise_()
+        self._well_location_dlg.activateWindow()
+
+    def _on_well_location_closed(self) -> None:
+        """Drop the reference once the well-location window is closed."""
+        self._well_location_dlg = None
 
     def _compute_scenario_hist(self, sc) -> "dict | None":
         """Compute hist_data dict for a scenario's well selection.
@@ -2471,6 +2571,8 @@ class MainWindow(QMainWindow):
         lines.append("")
         lines.append(f"\u0421\u0446\u0435\u043d\u0430\u0440\u0438\u0435\u0432 \u043f\u0440\u043e\u0433\u043d\u043e\u0437\u0430:  {len(self._scenarios)}")
         lines.append(f"\u0421\u0446\u0435\u043d\u0430\u0440\u0438\u0435\u0432 \u043f\u0440\u0438\u0432\u0435\u0434\u0451\u043d\u043d\u043e\u0439 \u0434\u043e\u0431\u044b\u0447\u0438:  {len(self._well_analysis_scenarios)}")
+        lines.append("")
+        lines.append(f"\u0424\u0430\u0439\u043b \u043a\u043e\u043e\u0440\u0434\u0438\u043d\u0430\u0442 \u0441\u043a\u0432\u0430\u0436\u0438\u043d:  {self._well_coords_path or '\u2014'}")
 
         QMessageBox.information(
             self,
@@ -2569,6 +2671,10 @@ class MainWindow(QMainWindow):
         self._hcpv                     = project.get("hcpv", 0.0)
         self._well_analysis_scenarios  = project.get("well_analysis_scenarios", [])
         self._col_mapping              = project.get("col_mapping", {})
+        self._well_coords_path         = project.get("well_coords_path", "")
+        self._well_coords_mapping      = project.get("well_coords_mapping", {})
+        self._well_coords_delimiters   = project.get("well_coords_delimiters", {})
+        self._update_well_coords_ui()
 
         # Load scenario 0 into working buffers (no commit needed — nothing to commit)
         self._load_scenario_into_buffers(0)
@@ -2647,6 +2753,9 @@ class MainWindow(QMainWindow):
                 hcpv=self._hcpv,
                 well_analysis_scenarios=self._well_analysis_scenarios,
                 col_mapping=self._col_mapping,
+                well_coords_path=self._well_coords_path,
+                well_coords_mapping=self._well_coords_mapping,
+                well_coords_delimiters=self._well_coords_delimiters,
             )
             self._act_project_info.setEnabled(True)
             self._refresh_forecast_plots()

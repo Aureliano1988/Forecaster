@@ -51,11 +51,21 @@ _DIST_PARAMS = [
 class ProductionDistributionDialog(QDialog):
     """Histogram of per-well metrics distribution."""
 
-    def __init__(self, df: pd.DataFrame, parent=None) -> None:
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        parent=None,
+        well_coords_path: str = "",
+        well_coords_mapping: dict | None = None,
+        well_coords_delimiters: dict | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Распределение")
         self.resize(1100, 650)
         self._df = df
+        self._coords_path = well_coords_path
+        self._coords_mapping = well_coords_mapping or {}
+        self._coords_delimiters = well_coords_delimiters or {}
 
         # Per-well metrics: {param_key: {well: value}}
         self._well_metrics: dict[str, dict[str, float]] = {}
@@ -191,6 +201,11 @@ class ProductionDistributionDialog(QDialog):
         btn_criteria.clicked.connect(self._on_criteria)
         gw_lay.addWidget(btn_criteria)
 
+        if self._coords_path:
+            btn_map = QPushButton("Выбрать на карте\u2026")
+            btn_map.clicked.connect(self._on_select_on_map)
+            gw_lay.addWidget(btn_map)
+
         left_lay.addWidget(grp_wells)
 
         # Parameter selector
@@ -274,16 +289,11 @@ class ProductionDistributionDialog(QDialog):
         self._spn_min.valueChanged.connect(self._draw)
         self._chk_cum.stateChanged.connect(self._draw)
 
-    # ── Criteria selection ─────────────────────────────────────────────────
+    # ── Selection helpers ────────────────────────────────────
 
-    def _on_criteria(self) -> None:
-        from src.ui.well_criteria_dialog import WellCriteriaDialog
-        cur = [item.text() for item in self._lst.selectedItems()]
-        dlg = WellCriteriaDialog(self._df, current_wells=cur, parent=self)
-        if dlg.exec() != WellCriteriaDialog.DialogCode.Accepted:
-            return
-        matched = dlg.matched_wells()
-        name_set = {n.lower() for n in matched}
+    def _apply_well_selection(self, names: list[str]) -> None:
+        """Select list items whose name (case-insensitive) is in *names*."""
+        name_set = {n.lower() for n in names}
         self._lst.blockSignals(True)
         self._lst.clearSelection()
         for i in range(self._lst.count()):
@@ -293,7 +303,26 @@ class ProductionDistributionDialog(QDialog):
         self._lst.blockSignals(False)
         self._lst.itemSelectionChanged.emit()
 
-    # ── Filter from file ─────────────────────────────────────────────────────
+    def _on_criteria(self) -> None:
+        from src.ui.well_criteria_dialog import WellCriteriaDialog
+        cur = [item.text() for item in self._lst.selectedItems()]
+        dlg = WellCriteriaDialog(self._df, current_wells=cur, parent=self)
+        if dlg.exec() != WellCriteriaDialog.DialogCode.Accepted:
+            return
+        self._apply_well_selection(dlg.matched_wells())
+
+    def _on_select_on_map(self) -> None:
+        from src.ui.well_location_dialog import WellLocationDialog
+        cur = [item.text() for item in self._lst.selectedItems()]
+        dlg = WellLocationDialog(
+            self._coords_path, self._coords_mapping, self._coords_delimiters,
+            parent=self, selection_mode=True, initial_selection=cur,
+        )
+        if dlg.exec() != WellLocationDialog.DialogCode.Accepted:
+            return
+        self._apply_well_selection(dlg.result_selected_wells())
+
+    # ── Filter from file ──────────────────────────────────────
 
     def _load_filter(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -315,15 +344,7 @@ class ProductionDistributionDialog(QDialog):
                 continue
         if not names:
             return
-        name_set = {n.lower() for n in names}
-        self._lst.blockSignals(True)
-        self._lst.clearSelection()
-        for i in range(self._lst.count()):
-            item = self._lst.item(i)
-            if item and item.text().lower() in name_set:
-                item.setSelected(True)
-        self._lst.blockSignals(False)
-        self._lst.itemSelectionChanged.emit()
+        self._apply_well_selection(names)
 
     # ── Drawing ──────────────────────────────────────────────────────────────────
 

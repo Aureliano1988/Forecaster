@@ -9,15 +9,15 @@ Desktop application for petroleum engineers to load well production history and 
 - **Data processing**: pandas, NumPy, SciPy
 - **Plotting**: Matplotlib embedded in Qt via `FigureCanvasQTAgg`
 - **File I/O**: openpyxl (Excel), built-in CSV
-- **Packaging**: PyInstaller (`forecaster.spec`), Inno Setup (`installer.iss`)
+- **Packaging**: PyInstaller (`main.spec`)
 
 ## Project Structure
 ```
 forecaster/
 ├── main.py                              # Entry point — QApplication + MainWindow
 ├── requirements.txt                     # PySide6, pandas, numpy, scipy, matplotlib, openpyxl
-├── forecaster.spec                      # PyInstaller spec
-├── installer.iss                        # Inno Setup script
+├── main.spec                            # PyInstaller spec
+├── PLAN.md                              # Original phased implementation plan (historical; largely superseded)
 ├── src/
 │   ├── data/
 │   │   ├── models.py                    # Column constants, HEADER_MAP, dataclasses:
@@ -44,11 +44,18 @@ forecaster/
 │   │   ├── forecast_inspector_dialog.py # Manage multiple named forecast scenarios
 │   │   ├── forecast_plots_dialog.py     # Multi-method interactive forecast comparison charts
 │   │   ├── summary_dialog.py            # Tabular summary of all built method results
+│   │   ├── export_data_dialog.py        # Cross-scenario metrics table builder (copy-to-clipboard)
 │   │   ├── trend_param_dialog.py        # Floating dialog for numeric trend parameter editing
 │   │   ├── reservoir_data_dialog.py     # Enter STOIIP and HCPV reservoir parameters
 │   │   ├── well_alignment_dialog.py     # Adjusted production: monthly vs months-since-first-production
 │   │   ├── well_analysis_scenario_dialog.py  # Create/rename/duplicate/delete well-analysis scenarios
-│   │   └── well_vintage_dialog.py       # Stacked area chart grouped by first-production year
+│   │   ├── well_vintage_dialog.py       # Stacked area chart grouped by first-production year
+│   │   ├── well_criteria_dialog.py      # Select wells by computed criteria (first-prod year, avg KE, etc.)
+│   │   ├── chan_plot_dialog.py          # Chan diagnostic plot: WOR / WOR' vs elapsed time (log-log)
+│   │   ├── production_distribution_dialog.py  # Histogram of per-well metrics (cum. oil, rates, watercut)
+│   │   ├── object_info_dialog.py        # Dashboard: production plots + 12 KPI metric cards for selection
+│   │   ├── hover_tooltip.py             # install_hover_tooltip() — shared matplotlib hover-label helper
+│   │   └── legend_helper.py             # fit_legend() — shared compact/draggable legend builder
 │   └── export/
 │       └── exporter.py                  # export_forecast_csv(), export_plot(),
 │                                        #   save_fcst_file(), load_fcst_file() — project persistence
@@ -92,19 +99,25 @@ All methods implement the `ForecastMethod` ABC (`base.py`):
 
 ### UI workflow
 1. Load file(s) → wells populate left panel (multi-file supported).
-2. Select well(s) → historical scatter/line appears in centre plot.
-3. Choose method family and variant in right panel.
+2. Select well(s) manually, via a saved well list, or via **well criteria** (`well_criteria_dialog.py` — filter by first-production year, average KE, months of production, etc.).
+3. Historical scatter/line appears in centre plot; choose method family and variant in right panel.
 4. Draw lasso on plot to select fitting range (blue polygon) or use eraser for exclusion zones (red).
 5. Click **"Построить прогноз"** → trend + forecast overlaid, parameters shown.
 6. Optionally use **"Редактировать тренд"** for drag-handle slope/intercept adjustment or **"Автоподбор"** / **"Автоподбор всех"** for automated fitting.
-7. Use **Forecast Inspector** (Ctrl+I) to manage scenarios, **Сводка прогнозов** for summary table, **Графики прогнозов** for comparison charts.
+7. Use **Forecast Inspector** (Ctrl+I) to manage scenarios, **Сводка прогнозов** for summary table, **Графики прогнозов** for comparison charts, **Экспорт данных** (`export_data_dialog.py`) for a cross-scenario metrics table.
 8. Enter reservoir data (STOIIP, HCPV) for RF/HCPVI computation.
-9. Export plot (PNG/SVG) or forecast table (CSV/Excel) via File menu.
-10. Save/load project as `.fcst` file (Ctrl+S / Ctrl+O).
+9. Use standalone diagnostic/analysis windows as needed: **Карточка объекта** (`object_info_dialog.py` — KPI dashboard), **График Чена** (`chan_plot_dialog.py` — WOR/WOR' diagnostic), **Распределение** (`production_distribution_dialog.py` — per-well metric histograms), **Выравнивание скважин** (`well_alignment_dialog.py`), **Группировка по годам** (`well_vintage_dialog.py`).
+10. Export plot (PNG/SVG) or forecast table (CSV/Excel) via File menu.
+11. Save/load project as `.fcst` file (Ctrl+S / Ctrl+O).
+
+### Shared UI helpers
+- `hover_tooltip.py` — `install_hover_tooltip()` attaches a cached, hover-driven label tooltip to any matplotlib canvas; used across the diagnostic dialogs.
+- `legend_helper.py` — `fit_legend()` builds a deduplicated, size-adaptive, draggable legend shared by multi-series plots.
 
 ### Export
 - `export_forecast_csv()` saves `x`, `forecast`, `method` columns to CSV (`;`-delimited, UTF-8-BOM) or Excel.
 - `export_plot()` saves the matplotlib figure to PNG or SVG at 150 dpi.
+- `export_data_dialog.py` builds a configurable cross-scenario summary table (RF, HCPVI, WOR, reserves, etc.) for copy-to-clipboard export.
 
 ## Conventions
 - UI labels, menu items, and user-facing strings are in **Russian**.

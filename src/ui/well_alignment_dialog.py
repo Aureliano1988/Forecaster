@@ -65,11 +65,17 @@ class WellAlignmentDialog(QDialog):
         df: pd.DataFrame,
         well_analysis_scenarios: list | None = None,
         parent=None,
+        well_coords_path: str = "",
+        well_coords_mapping: dict | None = None,
+        well_coords_delimiters: dict | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Приведённая добыча по скважинам")
         self.resize(1340, 720)
         self._df = df
+        self._coords_path = well_coords_path
+        self._coords_mapping = well_coords_mapping or {}
+        self._coords_delimiters = well_coords_delimiters or {}
 
         # Scenario state
         self._scenarios: list[WellAnalysisScenario] = list(
@@ -209,6 +215,11 @@ class WellAlignmentDialog(QDialog):
         btn_filter = QPushButton("Список\u2026")
         btn_filter.clicked.connect(self._load_filter)
         nav_row.addWidget(btn_filter)
+        if self._coords_path:
+            btn_map = QPushButton("На карте\u2026")
+            btn_map.setToolTip("Выбрать скважины контуром на карте")
+            btn_map.clicked.connect(self._on_select_on_map)
+            nav_row.addWidget(btn_map)
         gw_lay.addLayout(nav_row)
 
         left_lay.addWidget(grp_wells)
@@ -781,6 +792,18 @@ class WellAlignmentDialog(QDialog):
 
     # ── Filter ──────────────────────────────────────────────────────────────
 
+    def _apply_well_selection(self, names: list[str]) -> None:
+        """Select list items whose name (case-insensitive) is in *names*."""
+        name_set = {n.lower() for n in names}
+        self._lst.blockSignals(True)
+        self._lst.clearSelection()
+        for i in range(self._lst.count()):
+            item = self._lst.item(i)
+            if item and item.text().lower() in name_set:
+                item.setSelected(True)
+        self._lst.blockSignals(False)
+        self._lst.itemSelectionChanged.emit()
+
     def _load_filter(self) -> None:
         from PySide6.QtWidgets import QFileDialog
         path, _ = QFileDialog.getOpenFileName(
@@ -792,15 +815,18 @@ class WellAlignmentDialog(QDialog):
         names = self._read_well_list(path)
         if not names:
             return
-        name_set = {n.lower() for n in names}
-        self._lst.blockSignals(True)
-        self._lst.clearSelection()
-        for i in range(self._lst.count()):
-            item = self._lst.item(i)
-            if item and item.text().lower() in name_set:
-                item.setSelected(True)
-        self._lst.blockSignals(False)
-        self._lst.itemSelectionChanged.emit()
+        self._apply_well_selection(names)
+
+    def _on_select_on_map(self) -> None:
+        from src.ui.well_location_dialog import WellLocationDialog
+        cur = [item.text() for item in self._lst.selectedItems()]
+        dlg = WellLocationDialog(
+            self._coords_path, self._coords_mapping, self._coords_delimiters,
+            parent=self, selection_mode=True, initial_selection=cur,
+        )
+        if dlg.exec() != WellLocationDialog.DialogCode.Accepted:
+            return
+        self._apply_well_selection(dlg.result_selected_wells())
 
     @staticmethod
     def _read_well_list(path: str) -> list[str]:

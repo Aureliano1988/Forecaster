@@ -114,6 +114,9 @@ def save_fcst_file(
     hcpv: float = 0.0,
     well_analysis_scenarios=None,             # list[WellAnalysisScenario] | None
     col_mapping: dict[str, str] | None = None,
+    well_coords_path: str = "",
+    well_coords_mapping: dict | None = None,
+    well_coords_delimiters: dict | None = None,
 ) -> None:
     """Save all forecast scenarios to a .fcst v2.0 JSON file.
 
@@ -154,6 +157,9 @@ def save_fcst_file(
             well_analysis_scenarios or []
         ),
         "col_mapping": col_mapping or {},
+        "well_coords_path": well_coords_path or "",
+        "well_coords_mapping": well_coords_mapping or {},
+        "well_coords_delimiters": well_coords_delimiters or {},
     }
     Path(path).write_text(
         json.dumps(data, ensure_ascii=False, indent=2),
@@ -274,4 +280,7 @@ def load_fcst_file(path: str | Path) -> dict:
         "scenarios": scenarios,
         "well_analysis_scenarios": well_analysis_scenarios,
         "col_mapping": data.get("col_mapping", {}),
+        "well_coords_path": data.get("well_coords_path", ""),
+        "well_coords_mapping": data.get("well_coords_mapping", {}),
+        "well_coords_delimiters": data.get("well_coords_delimiters", {}),
     }
