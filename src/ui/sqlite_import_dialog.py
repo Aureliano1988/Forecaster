@@ -30,6 +30,7 @@ from src.data.sqlite_loader import (
     build_dataframe_for_objects,
     list_objects,
     list_oilfields,
+    open_connection,
 )
 
 
@@ -51,6 +52,7 @@ class SQLiteImportDialog(QDialog):
         self.resize(760, 520)
 
         self._db_path: str = ""
+        self._conn = None   # sqlite3.Connection, reused for this dialog's lifetime
         self._objects_cache: list[dict] = []   # last list_objects() result
         self._object_specs: list[dict] = []    # accepted selection
         self._result_df = None
@@ -58,6 +60,7 @@ class SQLiteImportDialog(QDialog):
 
         self._build_ui()
         self._update_ok_enabled()
+        self.finished.connect(self._on_finished)
 
     # ── Public API ───────────────────────────────────────────────────────
 
@@ -166,7 +169,8 @@ class SQLiteImportDialog(QDialog):
         if not path:
             return
         try:
-            fields = list_oilfields(path)
+            new_conn = open_connection(path)
+            fields = list_oilfields(new_conn)
         except SQLiteLoaderError as exc:
             QMessageBox.critical(self, "Ошибка чтения БД", str(exc))
             return
@@ -175,7 +179,13 @@ class SQLiteImportDialog(QDialog):
                 self, "Нет данных",
                 "В базе данных не найдено ни одного месторождения.",
             )
+            new_conn.close()
             return
+
+        # Replace any previously-open connection (e.g. user picked a different DB)
+        if self._conn is not None:
+            self._conn.close()
+        self._conn = new_conn
 
         self._db_path = path
         self._lbl_db.setText(path)
@@ -199,7 +209,7 @@ class SQLiteImportDialog(QDialog):
         self._objects_cache = []
 
         field_items = self._lst_fields.selectedItems()
-        if not field_items or not self._db_path:
+        if not field_items or self._conn is None:
             self._update_ok_enabled()
             return
 
@@ -207,7 +217,7 @@ class SQLiteImportDialog(QDialog):
             item.data(Qt.ItemDataRole.UserRole)["oilfield_id"] for item in field_items
         ]
         try:
-            objects = list_objects(self._db_path, oilfield_ids)
+            objects = list_objects(self._conn, oilfield_ids)
         except SQLiteLoaderError as exc:
             QMessageBox.critical(self, "Ошибка чтения БД", str(exc))
             self._update_ok_enabled()
@@ -244,7 +254,7 @@ class SQLiteImportDialog(QDialog):
 
         try:
             df, conflicts, well_coords = build_dataframe_for_objects(
-                self._db_path, selected_specs, include_coords=True
+                self._conn, selected_specs, include_coords=True
             )
         except SQLiteLoaderError as exc:
             QMessageBox.critical(self, "Ошибка загрузки", str(exc))
@@ -274,3 +284,11 @@ class SQLiteImportDialog(QDialog):
         self._result_df = df
         self._result_well_coords = well_coords
         self.accept()
+
+    # ── Cleanup ────────────────────────────────────────────────
+
+    def _on_finished(self, _result: int) -> None:
+        """Close the shared connection once the dialog is done (accept or cancel)."""
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None

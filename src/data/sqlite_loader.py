@@ -16,10 +16,19 @@ Mirrors the mapping used by ``Extract-Production-Script-SEQUENTIAL.ps1``
 - detects well-name collisions (the same name used by more than one
   ``WELL_ID`` across the objects/fields being loaded together) and
   disambiguates them automatically.
+
+Every public function accepts either a ``db_path`` string (a fresh,
+read-tuned connection is opened and closed for that single call) or an
+already-open ``sqlite3.Connection`` (reused as-is, left open for the
+caller to manage) — see :func:`open_connection`. Reusing one connection
+across several calls against the same database (e.g. while a user is
+browsing oilfields/objects in a dialog) avoids repeated file-open and
+cold-cache overhead, which matters on large databases or slow storage.
 """
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 
 import pandas as pd
@@ -67,6 +76,19 @@ _PRODUCTION_QUERY = """
     ORDER BY r.DT, w.WELL_NAME
 """
 
+# Lightweight companion to _PRODUCTION_QUERY: only the distinct well
+# identities for an object, without touching any monthly production
+# columns. Used to compute well-name-collision disambiguation without
+# paying the cost of fetching (and discarding) full production history —
+# e.g. when only coordinates are needed.
+_WELL_IDS_QUERY = """
+    SELECT DISTINCT r.WELL_ID AS WellId,
+           COALESCE(w.WELL_NAME, 'Well_' || r.WELL_ID) AS Well
+    FROM DW_MTH_OP_RAP r
+    LEFT JOIN DW_WELLS w ON r.WELL_ID = w.WELL_ID
+    WHERE r.OBJECT_ID = ?
+"""
+
 # Well coordinates are object-scoped in DW_PR_COORDS (the same well has one
 # row per productive layer/object it is completed in, with a slightly
 # different X/Y reflecting the deviated wellbore's position at that layer's
@@ -97,13 +119,71 @@ class SQLiteLoaderError(Exception):
     """Raised when the database cannot be read or has an unexpected schema."""
 
 
-def list_oilfields(db_path: str) -> list[dict]:
+# ── Connection management ──────────────────────────────────────
+
+
+def _configure_connection(conn: sqlite3.Connection) -> None:
+    """Apply read-oriented PRAGMAs to a freshly-opened connection.
+
+    These only affect this connection's read performance (no durability
+    trade-offs, since the app never writes to the source database):
+    keep temporary B-trees (used for ``ORDER BY``/``GROUP BY`` spills) in
+    memory, use a larger page cache, and memory-map the file when the
+    SQLite build supports it.
+    """
+    try:
+        conn.execute("PRAGMA temp_store = MEMORY")
+        conn.execute("PRAGMA cache_size = -64000")   # ~64 MB
+        conn.execute("PRAGMA mmap_size = 268435456")  # 256 MB, best-effort
+    except sqlite3.Error:
+        pass
+
+
+def open_connection(db_path: str) -> sqlite3.Connection:
+    """Open and read-tune a connection to *db_path*.
+
+    Callers that will issue several queries against the same database in
+    one interactive session (e.g. a dialog letting the user browse
+    oilfields/objects) should open one connection with this function, pass
+    it to the ``*_conn``-accepting functions below, and close it themselves
+    when done — this avoids repeated file-open and cold-cache overhead.
+    """
+    try:
+        conn = sqlite3.connect(db_path)
+    except sqlite3.Error as exc:
+        raise SQLiteLoaderError(f"Не удалось открыть базу данных: {exc}") from exc
+    _configure_connection(conn)
+    return conn
+
+
+@contextlib.contextmanager
+def _connection(db_path_or_conn: str | sqlite3.Connection):
+    """Yield a connection for *db_path_or_conn*.
+
+    If given an existing :class:`sqlite3.Connection`, it is reused as-is
+    and left open. If given a path string, a fresh read-tuned connection
+    is opened and closed automatically.
+    """
+    if isinstance(db_path_or_conn, sqlite3.Connection):
+        yield db_path_or_conn
+    else:
+        conn = open_connection(db_path_or_conn)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+
+# ── Oilfields / objects browsing ───────────────────────────────────
+
+
+def list_oilfields(db_path_or_conn: str | sqlite3.Connection) -> list[dict]:
     """Return every oilfield defined in the database.
 
     Each entry: ``{"oilfield_id": int, "oilfield_name": str}``.
     """
     try:
-        with sqlite3.connect(db_path) as conn:
+        with _connection(db_path_or_conn) as conn:
             cur = conn.execute(
                 "SELECT OILFIELD_ID, OILFIELD_NAME FROM DW_OILFIELD "
                 "ORDER BY OILFIELD_NAME"
@@ -116,27 +196,37 @@ def list_oilfields(db_path: str) -> list[dict]:
         raise SQLiteLoaderError(f"Не удалось прочитать месторождения: {exc}") from exc
 
 
-def list_objects(db_path: str, oilfield_ids: list[int]) -> list[dict]:
+def list_objects(
+    db_path_or_conn: str | sqlite3.Connection, oilfield_ids: list[int]
+) -> list[dict]:
     """Return objects with production data for any of *oilfield_ids*.
 
     Each entry: ``{"object_id", "object_name", "oilfield_id",
     "oilfield_name", "record_count"}``.
+
+    Uses a single aggregated ``GROUP BY`` join rather than a per-row
+    correlated subquery + ``EXISTS`` check, so the cost is one scan of
+    ``DW_MTH_OP_RAP`` regardless of how many objects match, instead of up
+    to two index/table lookups per candidate object.
     """
     if not oilfield_ids:
         return []
     placeholders = ",".join("?" for _ in oilfield_ids)
     query = f"""
-        SELECT DISTINCT o.OBJECT_ID, o.OBJECT_NAME, o.OILFIELD_ID, f.OILFIELD_NAME,
-               (SELECT COUNT(*) FROM DW_MTH_OP_RAP r WHERE r.OBJECT_ID = o.OBJECT_ID)
-               AS RecordCount
+        SELECT o.OBJECT_ID, o.OBJECT_NAME, o.OILFIELD_ID, f.OILFIELD_NAME,
+               cnt.RecordCount
         FROM DW_OBJECT o
         JOIN DW_OILFIELD f ON f.OILFIELD_ID = o.OILFIELD_ID
+        JOIN (
+            SELECT OBJECT_ID, COUNT(*) AS RecordCount
+            FROM DW_MTH_OP_RAP
+            GROUP BY OBJECT_ID
+        ) cnt ON cnt.OBJECT_ID = o.OBJECT_ID
         WHERE o.OILFIELD_ID IN ({placeholders})
-          AND EXISTS (SELECT 1 FROM DW_MTH_OP_RAP r WHERE r.OBJECT_ID = o.OBJECT_ID)
         ORDER BY f.OILFIELD_NAME, o.OBJECT_NAME
     """
     try:
-        with sqlite3.connect(db_path) as conn:
+        with _connection(db_path_or_conn) as conn:
             cur = conn.execute(query, oilfield_ids)
             return [
                 {
@@ -152,6 +242,9 @@ def list_objects(db_path: str, oilfield_ids: list[int]) -> list[dict]:
         raise SQLiteLoaderError(f"Не удалось прочитать объекты: {exc}") from exc
 
 
+# ── Production data ──────────────────────────────────────────
+
+
 def _fetch_object_production_conn(conn: sqlite3.Connection, object_id: int) -> pd.DataFrame:
     cur = conn.execute(_PRODUCTION_QUERY, (object_id,))
     cols = [d[0] for d in cur.description]
@@ -159,7 +252,17 @@ def _fetch_object_production_conn(conn: sqlite3.Connection, object_id: int) -> p
     return pd.DataFrame(rows, columns=cols)
 
 
-def fetch_object_production(db_path: str, object_id: int) -> pd.DataFrame:
+def _fetch_object_well_ids_conn(conn: sqlite3.Connection, object_id: int) -> pd.DataFrame:
+    """Return distinct well identities for *object_id* (no monthly data)."""
+    cur = conn.execute(_WELL_IDS_QUERY, (object_id,))
+    cols = [d[0] for d in cur.description]
+    rows = cur.fetchall()
+    return pd.DataFrame(rows, columns=cols)
+
+
+def fetch_object_production(
+    db_path_or_conn: str | sqlite3.Connection, object_id: int
+) -> pd.DataFrame:
     """Return raw monthly production rows for a single object.
 
     Columns: ``Date, WellId, Well, Oil_T, Water_T, Gas_M3, Condensate_T,
@@ -168,10 +271,13 @@ def fetch_object_production(db_path: str, object_id: int) -> pd.DataFrame:
     docstring.
     """
     try:
-        with sqlite3.connect(db_path) as conn:
+        with _connection(db_path_or_conn) as conn:
             return _fetch_object_production_conn(conn, object_id)
     except sqlite3.Error as exc:
         raise SQLiteLoaderError(f"Не удалось прочитать данные добычи: {exc}") from exc
+
+
+# ── Coordinates ────────────────────────────────────────────────
 
 
 def _fetch_object_coords_conn(
@@ -192,17 +298,81 @@ def _fetch_object_coords_conn(
     return pd.DataFrame(rows, columns=cols)
 
 
-def fetch_object_coords(db_path: str, object_ids: list[int]) -> pd.DataFrame:
+def fetch_object_coords(
+    db_path_or_conn: str | sqlite3.Connection, object_ids: list[int]
+) -> pd.DataFrame:
     """Return resolved well coordinates for *object_ids* (see module docstring)."""
     try:
-        with sqlite3.connect(db_path) as conn:
+        with _connection(db_path_or_conn) as conn:
             return _fetch_object_coords_conn(conn, object_ids)
     except sqlite3.Error as exc:
         raise SQLiteLoaderError(f"Не удалось прочитать координаты скважин: {exc}") from exc
 
 
+def fetch_well_coords(
+    db_path_or_conn: str | sqlite3.Connection, object_specs: list[dict]
+) -> dict[str, tuple[float, float]]:
+    """Return ``{well_name: (X, Y)}`` for *object_specs* without touching
+    monthly production data.
+
+    This is the lightweight counterpart to
+    :func:`build_dataframe_for_objects`'s coordinate handling, for callers
+    (e.g. re-drawing the well map) that only need coordinates and would
+    otherwise pay the cost of re-fetching and reprocessing the full
+    production history just to recompute well-name disambiguation. Well
+    names are disambiguated using the exact same rule as
+    :func:`build_dataframe_for_objects` (based only on distinct
+    ``(well_name, WELL_ID)`` pairs, which is all that rule ever needed),
+    so results are guaranteed consistent between the two.
+    """
+    if not object_specs:
+        return {}
+
+    try:
+        with _connection(db_path_or_conn) as conn:
+            chunks: list[pd.DataFrame] = []
+            for spec in object_specs:
+                chunk = _fetch_object_well_ids_conn(conn, spec["object_id"])
+                if chunk.empty:
+                    continue
+                chunk["_object_name"] = spec["object_name"]
+                chunks.append(chunk)
+
+            coords_raw = _fetch_object_coords_conn(
+                conn, [s["object_id"] for s in object_specs]
+            )
+    except sqlite3.Error as exc:
+        raise SQLiteLoaderError(f"Не удалось прочитать координаты скважин: {exc}") from exc
+
+    if coords_raw.empty:
+        return {}
+
+    rename_map: dict[tuple[str, int], str] = {}
+    if chunks:
+        raw = pd.concat(chunks, ignore_index=True)
+        raw["_orig_order"] = range(len(raw))
+        _conflicts, rename_map = _resolve_well_name_conflicts(raw)
+
+    object_order = {s["object_id"]: i for i, s in enumerate(object_specs)}
+    coords_raw = coords_raw.assign(
+        _obj_order=coords_raw["ObjectId"].map(object_order)
+    ).sort_values("_obj_order")
+
+    well_coords: dict[str, tuple[float, float]] = {}
+    for row in coords_raw.itertuples(index=False):
+        final_name = rename_map.get((row.Well, row.WellId), row.Well)
+        if final_name not in well_coords:
+            well_coords[final_name] = (float(row.X), float(row.Y))
+    return well_coords
+
+
+# ── Combined production + coordinates load ───────────────────────────────
+
+
 def build_dataframe_for_objects(
-    db_path: str, object_specs: list[dict], include_coords: bool = True
+    db_path_or_conn: str | sqlite3.Connection,
+    object_specs: list[dict],
+    include_coords: bool = True,
 ) -> tuple[pd.DataFrame, list[dict], dict[str, tuple[float, float]]]:
     """Load and combine production data (and optionally coordinates) for
     several oilfield/object picks.
@@ -223,12 +393,17 @@ def build_dataframe_for_objects(
       *include_coords* is ``False`` or no coordinates were found). When a
       well has coordinates under more than one of the selected objects, the
       object listed *earliest* in *object_specs* wins.
+
+    Prefer :func:`fetch_well_coords` instead when only coordinates are
+    needed (e.g. refreshing a well map) — this function always fetches
+    full monthly production rows for every selected object, which is
+    unnecessary overhead if the production DataFrame itself is discarded.
     """
     if not object_specs:
         raise SQLiteLoaderError("Не выбрано ни одного объекта для загрузки.")
 
     try:
-        with sqlite3.connect(db_path) as conn:
+        with _connection(db_path_or_conn) as conn:
             chunks: list[pd.DataFrame] = []
             for spec in object_specs:
                 chunk = _fetch_object_production_conn(conn, spec["object_id"])

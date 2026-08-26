@@ -2256,15 +2256,29 @@ class MainWindow(QMainWindow):
         """
         coords: dict[str, tuple[float, float]] = {}
         if self._sqlite_sources:
-            from src.data.sqlite_loader import SQLiteLoaderError, build_dataframe_for_objects
+            from src.data.sqlite_loader import (
+                SQLiteLoaderError,
+                fetch_well_coords,
+                open_connection,
+            )
+            # Group by db_path so entries sharing a database reuse one
+            # connection instead of reopening the file per entry.
+            entries_by_db: dict[str, list[dict]] = {}
             for entry in self._sqlite_sources:
+                entries_by_db.setdefault(entry["db_path"], []).append(entry)
+            for db_path, entries in entries_by_db.items():
                 try:
-                    _df, _conflicts, sqlite_coords = build_dataframe_for_objects(
-                        entry["db_path"], entry["objects"], include_coords=True
-                    )
+                    conn = open_connection(db_path)
                 except SQLiteLoaderError:
                     continue
-                coords.update(sqlite_coords)
+                try:
+                    for entry in entries:
+                        try:
+                            coords.update(fetch_well_coords(conn, entry["objects"]))
+                        except SQLiteLoaderError:
+                            continue
+                finally:
+                    conn.close()
         if self._well_coords_path:
             from src.ui.well_coords_dialog import resolve_file_well_coords
             file_coords = resolve_file_well_coords(
