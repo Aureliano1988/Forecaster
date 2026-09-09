@@ -71,7 +71,7 @@ class MethodPanel(QWidget):
         grp2_layout = QVBoxLayout(grp2)
         grp2_layout.addWidget(QLabel("Горизонт прогноза (мес.):"))
         self.spn_horizon = QSpinBox()
-        self.spn_horizon.setRange(1, 1200)
+        self.spn_horizon.setRange(1, 2400)
         self.spn_horizon.setValue(1200)
         grp2_layout.addWidget(self.spn_horizon)
 
