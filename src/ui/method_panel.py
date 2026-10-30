@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Signal, QDate
 from PySide6.QtWidgets import (
     QComboBox,
+    QDateEdit,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QPushButton,
+    QRadioButton,
     QSpinBox,
     QTextEdit,
     QVBoxLayout,
@@ -71,7 +74,7 @@ class MethodPanel(QWidget):
         grp2_layout = QVBoxLayout(grp2)
         grp2_layout.addWidget(QLabel("Горизонт прогноза (мес.):"))
         self.spn_horizon = QSpinBox()
-        self.spn_horizon.setRange(1, 1200)
+        self.spn_horizon.setRange(1, 2400)
         self.spn_horizon.setValue(1200)
         grp2_layout.addWidget(self.spn_horizon)
 
@@ -112,6 +115,35 @@ class MethodPanel(QWidget):
         )
         grp2_layout.addWidget(self.cmb_dca_mode)
 
+        # Forecast start date
+        grp2_layout.addWidget(QLabel("Дата начала прогноза:"))
+        self.date_forecast = QDateEdit()
+        self.date_forecast.setCalendarPopup(True)
+        self.date_forecast.setDisplayFormat("dd.MM.yyyy")
+        self.date_forecast.setDate(QDate.currentDate())
+        self.date_forecast.setCorrectionMode(
+            QDateEdit.CorrectionMode.CorrectToNearestValue
+        )
+        self.date_forecast.setToolTip(
+            "Дата, с которой начинается прогноз.\n"
+            "По умолчанию — последняя дата добычи.\n"
+            "Вводите дату в формате дд.мм.гггг или выберите в календаре."
+        )
+        grp2_layout.addWidget(self.date_forecast)
+
+        # Overlap mode
+        grp2_layout.addWidget(QLabel("Пересечение с историей:"))
+        self._rb_overlap_hist = QRadioButton("История")
+        self._rb_overlap_fc   = QRadioButton("Прогноз")
+        self._rb_overlap_hist.setChecked(True)
+        self._rb_overlap_hist.setToolTip("В зоне пересечения использовать исторические данные.")
+        self._rb_overlap_fc.setToolTip("В зоне пересечения использовать прогнозные данные.")
+        overlap_row = QHBoxLayout()
+        overlap_row.addWidget(self._rb_overlap_hist)
+        overlap_row.addWidget(self._rb_overlap_fc)
+        overlap_row.addStretch()
+        grp2_layout.addLayout(overlap_row)
+
         layout.addWidget(grp2)
 
         # ── Action buttons ───────────────────────────────────────────────────
@@ -126,8 +158,10 @@ class MethodPanel(QWidget):
         self.btn_eraser.setCheckable(True)
         layout.addWidget(self.btn_build)
         layout.addWidget(self.btn_edit)
-        layout.addWidget(self.btn_autofit)
-        layout.addWidget(self.btn_autofit_all)
+        autofit_row = QHBoxLayout()
+        autofit_row.addWidget(self.btn_autofit)
+        autofit_row.addWidget(self.btn_autofit_all)
+        layout.addLayout(autofit_row)
         layout.addWidget(self.btn_discard)
         layout.addWidget(self.btn_eraser)
 
@@ -136,7 +170,7 @@ class MethodPanel(QWidget):
         grp3_layout = QVBoxLayout(grp3)
         self.txt_result = QTextEdit()
         self.txt_result.setReadOnly(True)
-        self.txt_result.setMinimumHeight(160)
+        self.txt_result.setMinimumHeight(128)
         grp3_layout.addWidget(self.txt_result)
         layout.addWidget(grp3)
 
@@ -191,6 +225,20 @@ class MethodPanel(QWidget):
         but this method clamps defensively in case of any unexpected state.
         """
         return max(1, min(120, int(self.spn_n_avg.value())))
+
+    def get_forecast_date(self) -> QDate:
+        """Return the selected forecast start date."""
+        return self.date_forecast.date()
+
+    def set_forecast_date(self, date: QDate) -> None:
+        """Set the forecast start date without emitting signals."""
+        self.date_forecast.blockSignals(True)
+        self.date_forecast.setDate(date)
+        self.date_forecast.blockSignals(False)
+
+    def get_overlap_mode(self) -> str:
+        """Return 'history' or 'forecast'."""
+        return "forecast" if self._rb_overlap_fc.isChecked() else "history"
 
     def show_result(self, text: str) -> None:
         self.txt_result.setPlainText(text)

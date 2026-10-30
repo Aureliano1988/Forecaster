@@ -152,6 +152,7 @@ class ForecastPlotsDialog(QDialog):
         n_avg: int = 3,
         scenarios=None,           # list[ForecastScenario] | None
         scenarios_hist=None,      # list[dict | None] | None  — per-scenario hist_data
+        forecast_date: pd.Timestamp | None = None,  # user-selected forecast start date
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -181,29 +182,18 @@ class ForecastPlotsDialog(QDialog):
         # May also contain RF and HCPVI if STOIIP/HCPV are set in main window
         self._hist: dict | None = hist_data
 
-        # Last historical date for date-axis formatting
+        # Forecast anchor date: user-selected forecast start date
+        # or last production date if not specified
         self._last_hist_date: pd.Timestamp | None = None
         self._n_hist: int = 0
-        mw = parent
-        if mw is not None and hasattr(mw, "df") and mw.df is not None:
-            from src.data.models import COL_DATE, COL_OIL, COL_WELL, COL_WORK_TYPE, WORK_TYPE_OIL
-            sub = mw.df
-            if COL_WORK_TYPE in sub.columns:
-                sub = sub[sub[COL_WORK_TYPE] == WORK_TYPE_OIL]
-            if hasattr(mw, "_selected_wells") and mw._selected_wells:
-                sub = sub[sub[COL_WELL].isin(mw._selected_wells)]
-            if COL_DATE in sub.columns and len(sub) > 0:
-                dates = sub.groupby(COL_DATE)[COL_OIL].sum().sort_index()
-                dates = dates[dates > 0]
-                if len(dates) > 0:
-                    self._last_hist_date = pd.Timestamp(dates.index[-1])
-                    self._n_hist = len(dates)
+        self._compute_date_info(forecast_date)
 
         title = "Графики прогнозов"
         if project_name:
             title += f" — {project_name}"
         self.setWindowTitle(title)
         self.resize(1400, 720)
+        self._forecast_date = forecast_date
 
         root = QVBoxLayout(self)
         root.setContentsMargins(4, 4, 4, 4)
@@ -412,6 +402,7 @@ class ForecastPlotsDialog(QDialog):
         n_avg: int = 3,
         scenarios=None,
         scenarios_hist=None,
+        forecast_date: pd.Timestamp | None = None,
     ) -> None:
         """Update data from the main window and redraw."""
         self._stoiip = stoiip
@@ -422,6 +413,7 @@ class ForecastPlotsDialog(QDialog):
         self._hist = hist_data
         self._scenarios = list(scenarios) if scenarios else []
         self._scenarios_hist = list(scenarios_hist) if scenarios_hist else []
+        self._forecast_date = forecast_date
 
         new_data = {
             k: v for k, v in saved_results.items()
@@ -448,25 +440,44 @@ class ForecastPlotsDialog(QDialog):
                     item.setSelected(True)
             self._lst.blockSignals(False)
 
-        mw = self.parent()
-        if mw is not None and hasattr(mw, "df") and mw.df is not None:
-            from src.data.models import COL_DATE as _CD, COL_OIL as _CO, COL_WELL as _CW
-            from src.data.models import COL_WORK_TYPE as _CT, WORK_TYPE_OIL as _WO
-            sub = mw.df
-            if _CT in sub.columns:
-                sub = sub[sub[_CT] == _WO]
-            if hasattr(mw, "_selected_wells") and mw._selected_wells:
-                sub = sub[sub[_CW].isin(mw._selected_wells)]
-            if _CD in sub.columns and len(sub) > 0:
-                dates = sub.groupby(_CD)[_CO].sum().sort_index()
-                dates = dates[dates > 0]
-                if len(dates) > 0:
-                    self._last_hist_date = pd.Timestamp(dates.index[-1])
-                    self._n_hist = len(dates)
+        self._compute_date_info(forecast_date)
 
         self._pct_methods = None
         self._show_pct = False
         self._draw()
+
+    def _compute_date_info(self, forecast_date: pd.Timestamp | None = None) -> None:
+        """Compute _last_hist_date and _n_hist from the parent's data.
+
+        When *forecast_date* is given and falls before the last production
+        date, it is used as the anchor so the forecast lines start at the
+        correct position on the date axis.
+        """
+        mw = self.parent()
+        if mw is None or not hasattr(mw, "df") or mw.df is None:
+            return
+        from src.data.models import COL_DATE, COL_OIL, COL_WELL, COL_WORK_TYPE, WORK_TYPE_OIL
+        sub = mw.df
+        if COL_WORK_TYPE in sub.columns:
+            sub = sub[sub[COL_WORK_TYPE] == WORK_TYPE_OIL]
+        if hasattr(mw, "_selected_wells") and mw._selected_wells:
+            sub = sub[sub[COL_WELL].isin(mw._selected_wells)]
+        if COL_DATE not in sub.columns or len(sub) == 0:
+            return
+        dates = sub.groupby(COL_DATE)[COL_OIL].sum().sort_index()
+        dates = dates[dates > 0]
+        if len(dates) == 0:
+            return
+        last_prod = pd.Timestamp(dates.index[-1])
+        # Use forecast date as anchor if it's earlier than last production
+        if forecast_date is not None and forecast_date < last_prod:
+            anchor = forecast_date
+            # n_hist = number of months up to forecast date
+            self._n_hist = int((dates.index <= forecast_date).sum())
+        else:
+            anchor = last_prod
+            self._n_hist = len(dates)
+        self._last_hist_date = anchor
 
     # ── Averaging helper (matches MainWindow._avg_last) ───────────────
 

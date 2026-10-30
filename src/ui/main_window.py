@@ -491,6 +491,7 @@ class MainWindow(QMainWindow):
 
         self._update_window_title()
         self._refresh_scenario_combo()
+        self._update_forecast_date()
         return append
 
     def _on_load_sqlite(self) -> None:
@@ -565,6 +566,7 @@ class MainWindow(QMainWindow):
         self._saved_results.clear()   # underlying data changed
         self._fit_result_text = ""
         self._agg_cache = None         # invalidate aggregation cache
+        self._update_forecast_date()
         self._on_plot_data()
         self._sync_inspector()
 
@@ -611,6 +613,21 @@ class MainWindow(QMainWindow):
             self._commit_active_scenario()
             self._inspector_dlg.sync_from_main(
                 self._scenarios, self._active_scenario_idx
+            )
+
+    def _update_forecast_date(self) -> None:
+        """Set forecast start date to the last production date for selected wells."""
+        if self.df is None or not self._selected_wells:
+            return
+        sub = self._get_sub()
+        if sub is None or COL_DATE not in sub.columns:
+            return
+        last_date = sub[COL_DATE].max()
+        if pd.notna(last_date):
+            from PySide6.QtCore import QDate
+            dt = pd.Timestamp(last_date)
+            self.method_panel.set_forecast_date(
+                QDate(dt.year, dt.month, dt.day)
             )
 
     def _update_window_title(self) -> None:
@@ -740,6 +757,15 @@ class MainWindow(QMainWindow):
         if COL_WORK_TYPE in sub.columns:
             sub = sub[sub[COL_WORK_TYPE] == WORK_TYPE_OIL]
         return sub
+
+    def _get_sub_until_date(self) -> pd.DataFrame | None:
+        """Return sub-frame filtered to rows up to the forecast start date."""
+        sub = self._get_sub()
+        if sub is None or COL_DATE not in sub.columns:
+            return sub
+        fc_qdate = self.method_panel.get_forecast_date()
+        fc_date = pd.Timestamp(fc_qdate.year(), fc_qdate.month(), fc_qdate.day())
+        return sub[sub[COL_DATE] <= fc_date]
 
     def _result_key(self) -> str:
         """Unique key for the currently-selected method."""
@@ -1077,22 +1103,40 @@ class MainWindow(QMainWindow):
         min_oil    = self.method_panel.get_min_oil()
         n_avg      = self.method_panel.get_n_avg()
         family     = self.method_panel.get_family_name()
-        x_last     = float(x[-1])
+
+        # Determine x_last and y-series from data up to the forecast date
+        x_fc_data: np.ndarray | None = None
+        y_fc_data: np.ndarray | None = None
+        sub_fc = self._get_sub_until_date()
+        if sub_fc is not None and not sub_fc.empty:
+            x_fc_data, y_fc_data = self._get_xy_for(
+                family,
+                self.method_panel.get_method_class()
+                if family == "Характеристики вытеснения" else None,
+                sub_override=sub_fc,
+            )
+            if x_fc_data is not None and len(x_fc_data) > 0:
+                x_last = float(x_fc_data[-1])
+            else:
+                x_last = float(x[-1])
+        else:
+            x_last = float(x[-1])
         # Last historical oil rate — used to anchor DCA forecast
-        # For DCA: average last n_avg rates from the method-space y-series
-        if n_avg > 1 and len(y) >= 1:
-            q_last_oil, _used = self._avg_last(y, n_avg)
+        # For DCA: average last n_avg rates from the date-filtered y-series
+        y_for_avg = y_fc_data if (y_fc_data is not None and len(y_fc_data) > 0) else y
+        if n_avg > 1 and len(y_for_avg) >= 1:
+            q_last_oil, _used = self._avg_last(y_for_avg, n_avg)
             if _used < n_avg:
                 self.status.showMessage(
                     f"Среднее DCA: запрошено {n_avg} мес., доступно {_used}", 5000
                 )
         else:
-            q_last_oil = float(y[-1]) if len(y) else 0.0
+            q_last_oil = float(y_for_avg[-1]) if len(y_for_avg) else 0.0
 
         # ── Physical last values for monthly forecast builders ─────────────────
         Qo_last = Ql_last = Qw_last = ql_last = 0.0
         qo_last_monthly = qw_last_monthly = 0.0
-        sub = self._get_sub()
+        sub = self._get_sub_until_date()
         if sub is not None:
             prod = self._get_displacement_data(sub)
             if prod is not None:
@@ -1208,20 +1252,68 @@ class MainWindow(QMainWindow):
             self._forecast_line, = ax.plot(x_fc, y_fc, "g--", lw=2, label="Прогноз")
         self.plot_widget.redraw()
 
-        # ── Results text ─────────────────────────────────────────────────
+        # ── Overlap adjustment for EUR / remain_reserves ─────────────────
+        # When forecast date < last production date, there is an overlap.
+        # Qo_last = cum. oil up to forecast date
+        # Qo_full = cum. oil for the entire history (all dates)
+        overlap_mode = self.method_panel.get_overlap_mode()
+        Qo_full = Qo_last  # default: no overlap
+        overlap_months = 0
+        sub_full = self._get_sub()
+        if sub_full is not None:
+            prod_full = self._get_displacement_data(sub_full)
+            if prod_full is not None and len(prod_full[0]) > 0:
+                Qo_full = float(prod_full[0][-1])
+        overlap_oil = Qo_full - Qo_last  # historical oil in the overlap period
+        if monthly and monthly.duration > 0 and overlap_oil > 0:
+            if overlap_mode == "history":
+                # Use historical data in the overlap: EUR = Qo_full + (forecast - overlap_forecast)
+                # remain = total forecast oil - overlap portion of forecast + historical overlap oil
+                fc_oil_arr = np.array(monthly.qo, dtype=float)
+                # How many forecast months overlap with history?
+                overlap_months = 0
+                fc_cum = 0.0
+                for i, qo_m in enumerate(fc_oil_arr):
+                    fc_cum += qo_m
+                    if fc_cum >= overlap_oil:
+                        overlap_months = i + 1
+                        break
+                else:
+                    overlap_months = len(fc_oil_arr)
+                # remain = forecast oil after overlap + historical overlap
+                fc_remain_after_overlap = float(np.sum(fc_oil_arr[overlap_months:]))
+                effective_remain = overlap_oil + fc_remain_after_overlap
+                effective_qo_hist = Qo_last  # base is up to forecast date
+                uur = Qo_full + fc_remain_after_overlap
+            else:
+                # Use forecast data in the overlap: EUR = Qo_last + full forecast remain
+                effective_remain = monthly.remain_reserves
+                effective_qo_hist = Qo_last
+                uur = Qo_last + monthly.remain_reserves
+        elif monthly and monthly.duration > 0:
+            effective_remain = monthly.remain_reserves
+            effective_qo_hist = Qo_last
+            uur = Qo_last + monthly.remain_reserves
+        else:
+            effective_remain = 0.0
+            effective_qo_hist = Qo_last
+            uur = Qo_last
+
+        # ── Results text ─────────────────────────────────────────────────────
         result_text = self._fit_result_text
         if monthly and monthly.duration > 0:
             stopped_by = monthly.stop_reason or "горизонт"
-            uur = Qo_last + monthly.remain_reserves
             result_text += (
                 f"\n{'\u2500'*22}\n"
                 f"Прогноз (стоп: {stopped_by}):\n"
                 f"  Горизонт: {monthly.duration} мес.\n"
-                f"  Нак. нефть (факт): {Qo_last:,.0f} т\n"
-                f"  Ост. запасы: {monthly.remain_reserves:,.0f} т\n"
+                f"  Нак. нефть (факт): {Qo_full:,.0f} т\n"
+                f"  Ост. запасы: {effective_remain:,.0f} т\n"
                 f"  НТИК: {uur:,.0f} т\n"
                 f"  ВНФ (посл.): {monthly.wor_last:.2f}"
             )
+            if overlap_oil > 0:
+                result_text += f"\n  Пересечение: {overlap_months} мес. ({overlap_mode})"
             if _dca_mode == "rate":
                 result_text += f"\n  КЭ: {_ke:.3f}"
         self.method_panel.show_result(result_text)
@@ -1246,7 +1338,7 @@ class MainWindow(QMainWindow):
             x_forecast=x_fc.tolist(),
             y_forecast=y_fc.tolist(),
             monthly=monthly,
-            qo_hist_last=Qo_last,
+            qo_hist_last=Qo_full,
         )
         self._update_window_title()
         # Defer heavy refresh while user is interactively dragging the trend
@@ -1308,6 +1400,8 @@ class MainWindow(QMainWindow):
                     hist_data["comp_tot"] = np.divide(Qi_h, Ql_h, out=np.zeros(n_prod, dtype=float), where=Ql_h > 0)
         self._commit_active_scenario()
         sc_hist = [self._compute_scenario_hist(sc) for sc in self._scenarios]
+        fc_qd = self.method_panel.get_forecast_date()
+        fc_ts = pd.Timestamp(fc_qd.year(), fc_qd.month(), fc_qd.day())
         dlg.refresh(
             self._saved_results,
             hist_data=hist_data,
@@ -1318,6 +1412,7 @@ class MainWindow(QMainWindow):
             n_avg=self.method_panel.get_n_avg(),
             scenarios=self._scenarios,
             scenarios_hist=sc_hist,
+            forecast_date=fc_ts,
         )
 
     # ── Export plot ───────────────────────────────────────────────────────
@@ -1369,12 +1464,13 @@ class MainWindow(QMainWindow):
         return self._get_xy_for(family, method_cls)
 
     def _get_xy_for(
-        self, family: str, method_cls=None
+        self, family: str, method_cls=None,
+        sub_override: pd.DataFrame | None = None,
     ) -> tuple[np.ndarray | None, np.ndarray | None]:
         """Return (x, y) for arbitrary family + method class (panel-independent)."""
         if self.df is None or not self._selected_wells:
             return None, None
-        sub = self._get_sub()
+        sub = sub_override if sub_override is not None else self._get_sub()
         if sub is None:
             return None, None
 
@@ -2556,6 +2652,10 @@ class MainWindow(QMainWindow):
         # Compute historical data for every scenario (for the scenario-comparison mode)
         scenarios_hist = [self._compute_scenario_hist(sc) for sc in self._scenarios]
 
+        # Forecast date for positioning
+        fc_qd = self.method_panel.get_forecast_date()
+        fc_ts = pd.Timestamp(fc_qd.year(), fc_qd.month(), fc_qd.day())
+
         from src.ui.forecast_plots_dialog import ForecastPlotsDialog
         self._forecast_plots_dlg = ForecastPlotsDialog(
             self._saved_results,
@@ -2568,6 +2668,7 @@ class MainWindow(QMainWindow):
             n_avg=self.method_panel.get_n_avg(),
             scenarios=self._scenarios,
             scenarios_hist=scenarios_hist,
+            forecast_date=fc_ts,
             parent=self,
         )
         self._forecast_plots_dlg.finished.connect(
